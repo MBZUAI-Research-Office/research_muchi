@@ -23,6 +23,7 @@ class Llama2:
         pipeline = transformers.pipeline(
             "text-generation",
             model=self.model,
+            tokenizer=self.tokenizer,
             torch_dtype=torch.float16,
             device_map="auto",
         )
