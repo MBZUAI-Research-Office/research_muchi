@@ -1,4 +1,5 @@
 import argparse
+import time
 
 from transformers import AutoTokenizer, LlamaForCausalLM, LlamaTokenizer
 import transformers
@@ -18,6 +19,7 @@ class Llama2:
             self.tokenizer = AutoTokenizer.from_pretrained(remote_model_name)
 
     def run_inference(self, prompt: str) -> None:
+        start_time = time.time()
         pipeline = transformers.pipeline(
             "text-generation",
             model=self.model,
@@ -35,6 +37,8 @@ class Llama2:
 
         for seq in sequences:
             print(f"Result: {seq['generated_text']}")
+
+        print(f"--- inference completed in {time.time() - start_time} seconds ---")
 
 
 if __name__ == "__main__":
