@@ -1,3 +1,4 @@
+#!/Users/xiangruike/miniconda3/envs/mlperf/python
 import argparse
 
 import mlx.core as mx
