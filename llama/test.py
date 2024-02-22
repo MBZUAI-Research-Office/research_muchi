@@ -39,6 +39,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompt",
         type=str,
+        default="hello",
         help="input to the specified model",
     )
     args = parser.parse_args()
