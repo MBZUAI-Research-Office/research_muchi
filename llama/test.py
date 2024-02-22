@@ -25,7 +25,7 @@ def main(args):
     else:
         prompt = args.prompt
 
-    generate(model, tokenizer, args.prompt, temp=default_temp, verbose=True)
+    generate(model, tokenizer, prompt, temp=default_temp, verbose=True)
 
 
 if __name__ == "__main__":
