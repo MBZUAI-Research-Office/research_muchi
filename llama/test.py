@@ -1,5 +1,6 @@
-from mlx_lm import load, generate
+import subprocess
 
 if __name__ == "__main__":
-    model, tokenizer = load("~/Llama-2-7b-chat-hf")
-    response = generate(model, tokenizer, prompt="hello", verbose=True)
+    subprocess.call(
+        'python -m mlx_lm.generate --model ~/Llama-2-7b-chat-hf --prompt "hello"'
+    )
