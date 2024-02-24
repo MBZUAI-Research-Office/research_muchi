@@ -1,4 +1,4 @@
-# bare-bones wrappers for running llama 2 with major ML frameworks
+# thin wrappers for running llama 2 with major ML frameworks
 
 ## MLX
 
@@ -13,6 +13,8 @@ https://pytorch.org/get-started/locally/
 
 ### sample command
 ```sh
+cd llama/
+
 # prompt defaults to hello
 python mlx_quickstart.py --model ~/Llama-2-7b-chat --prompt "hola"
 ```
