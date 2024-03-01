@@ -1,8 +1,30 @@
+#!/Users/xiangruike/miniconda3/envs/custom_mlx_lm/bin/python
+
+# ------ shebangs ------
+# for standard testing:
 #!/Users/xiangruike/miniconda3/envs/mlperf/bin/python
+# for custom mlx install:
+#!/Users/xiangruike/miniconda3/envs/mlx_gc/bin/python
+# for custom mlx_lm install:
+#!/Users/xiangruike/miniconda3/envs/custom_mlx_lm/bin/python
+
 import argparse
 
 import mlx.core as mx
 from mlx_lm import load, generate
+
+
+def pre_allocate():
+    allocation_counts = 6300
+    allocation_size = 72
+
+    arrays = []
+    for i in range(allocation_counts):
+        arrays.append(mx.zeros((allocation_size,)))
+    mx.eval(arrays)
+
+    # release
+    arrays = []
 
 
 def main(args):
@@ -45,4 +67,5 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # pre_allocate()
     main(args)
