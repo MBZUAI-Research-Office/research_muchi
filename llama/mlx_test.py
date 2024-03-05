@@ -8,15 +8,19 @@ import mlx.core as mx
 
 class RepresentativeWorkload:
 
-    DEFAULT_INPUT_DIM = 32768
+    DEFAULT_INPUT_DIM = 16384
 
     # mx.random.uniform() is used to produce the weights, of which
     # the default return dtype is float32. Therefore, the size of
     # each weights matrix is:
-    # (32768 * 32768 * 4) / (1024 * 1024 * 1024) = 4 GiB
-    DEFAULT_WEIGHTS_M = 32768
-    DEFAULT_WEIGHTS_N = 32768
-    DEFAULT_WEIGHTS_SIZE = 4  # in GiB
+    # (16384 * 16384 * 4) / (1024 * 1024 * 1024) = 1 GiB
+    DEFAULT_WEIGHTS_M = 16384
+    DEFAULT_WEIGHTS_N = 16384
+    DEFAULT_WEIGHTS_SIZE = 1  # in GiB
+    # number of weight matrices per layer
+    # intends to mimic the multi-head attention mechanism which consists of
+    # query, key, value, and output projections
+    NUM_MAT_PER_LAYER = 4
 
     def __init__(self, total_weights_size: int, load_by_layer: bool) -> None:
         """Encapsulates a simple yet memory demanding workload
@@ -24,19 +28,26 @@ class RepresentativeWorkload:
         Args:
             total_weights_size (int): size of weights in GiB to load into unified memory.
         """
-        assert total_weights_size % self.DEFAULT_WEIGHTS_SIZE == 0
-
-        mx.set_default_device(mx.gpu)
+        self.layer_weights_size = self.DEFAULT_WEIGHTS_SIZE * self.NUM_MAT_PER_LAYER
+        assert total_weights_size % self.layer_weights_size == 0
         self.weights = self.load_weights(total_weights_size, load_by_layer)
 
     def load_weights(self, total_weights_size: int, load_by_layer: bool):
-        num_layers = int(total_weights_size / self.DEFAULT_WEIGHTS_SIZE)
+        num_layers = int(total_weights_size / self.layer_weights_size)
         if load_by_layer:
+            print(
+                "\n------ "
+                + f"loading {num_layers} layers' weights individually "
+                + f"{self.layer_weights_size} GiB at a time "
+                + "------",
+                flush=True,
+            )
             weights = []
             for _ in range(num_layers):
                 weights.append(
                     mx.random.uniform(
                         shape=(
+                            self.NUM_MAT_PER_LAYER,
                             self.DEFAULT_WEIGHTS_M,
                             self.DEFAULT_WEIGHTS_N,
                         )
@@ -46,6 +57,7 @@ class RepresentativeWorkload:
             weights = mx.random.uniform(
                 shape=(
                     num_layers,
+                    self.NUM_MAT_PER_LAYER,
                     self.DEFAULT_WEIGHTS_M,
                     self.DEFAULT_WEIGHTS_N,
                 )
@@ -56,7 +68,11 @@ class RepresentativeWorkload:
     def generate_token(self, input: mx.array) -> None:
         token = input
         for layer in self.weights:
-            token = mx.maximum(mx.matmul(token, layer), 0)
+            # intends to mimic q, k, v, o projections
+            # see: https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/llama.py
+            for proj in layer:
+                token = mx.matmul(token, proj)
+            token = mx.maximum(token, 0)
         mx.eval(token)
 
     def generate(self, n_tokens: int) -> None:
@@ -102,6 +118,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    mx.set_default_device(mx.gpu)
     model = RepresentativeWorkload(
         total_weights_size=args.total_weights_size, load_by_layer=args.load_by_layer
     )
