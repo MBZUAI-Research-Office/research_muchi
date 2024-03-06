@@ -5,145 +5,104 @@ import time
 
 import mlx.core as mx
 
+# in GB
+DEFAULT_DATA_SIZE = 10
+# loads all weights in a giant array by default to optimize memory access
+DEFAULT_N_BLOCKS = 1
+DEFAULT_MAT_DIM = 5000
+
 
 class RepresentativeWorkload:
 
-    # mx.random.uniform() is used to produce the weights, of which
-    # the default return dtype is float32. Therefore, the size of
-    # each weights matrix is:
-    # (32768 * 32768 * 4) / (1024 * 1024 * 1024) = 4 GiB
-    WEIGHTS_M = 32768
-    WEIGHTS_N = 32768
-    WEIGHTS_SIZE = 4  # in GiB
-
     def __init__(
         self,
-        total_weights_size: int,
-        n_load_blocks: int,
-        n_matmuls_per_layer: int,
-        n_tokens: int,
+        data_size: int,
+        n_blocks: int,
+        mat_dim: int,
     ) -> None:
-        """Encapsulates a simple yet memory demanding workload
+        # square matrix with 4 bytes (float32) cells
+        mat_size = 4 * (mat_dim**2)
+        data_size *= 10**9
+        assert data_size % (n_blocks * mat_size) == 0
 
-        Args:
-            total_weights_size (int): size of weights in GiB to load into unified memory.
-        """
-        self.total_weights_size = total_weights_size
-        self.n_load_blocks = n_load_blocks
-        self.n_matmuls_per_layer = n_matmuls_per_layer
-        self.n_tokens = n_tokens
-        self.num_layers = int(self.total_weights_size / self.WEIGHTS_SIZE)
+        self.n_mats_per_block = int(data_size / (n_blocks * mat_size))
+        self.data_size = data_size
+        self.n_blocks = n_blocks
+        self.mat_dim = mat_dim
+        self.data = self.load_data()
 
-        assert self.total_weights_size % self.n_load_blocks == 0
-        self.weights_block_size = int(total_weights_size / n_load_blocks)
-
-        assert self.weights_block_size % self.WEIGHTS_SIZE == 0
-        self.n_weights_per_block = int(self.weights_block_size / self.WEIGHTS_SIZE)
-
-        self.weights = self.load_weights(n_load_blocks)
-
-    def load_weights(self):
-        if self.n_load_blocks > 1:
+    def load_data(self):
+        if self.n_blocks > 1:
             print(
-                "\n------ "
-                + f"loading {self.n_load_blocks} blocks of weights sequentially as individual arrays "
-                + f"{self.weights_block_size} GiB at a time "
+                "------ "
+                + f"loading {self.n_blocks} blocks of data sequentially as individual arrays "
+                + f"{int(self.data_size / self.n_blocks)} bytes at a time "
                 + "------",
                 flush=True,
             )
 
-        weights = []
+        tic = time.perf_counter()
 
-        for _ in range(self.n_load_blocks):
-            weights.append(
+        data = []
+        for _ in range(self.n_blocks):
+            data.append(
                 mx.random.uniform(
                     shape=(
-                        self.n_weights_per_block,
-                        self.WEIGHTS_M,
-                        self.WEIGHTS_N,
+                        self.n_mats_per_block,
+                        self.mat_dim,
+                        self.mat_dim,
                     )
                 )
             )
+        mx.eval(data)
 
-        # mlx has lazy evaluation: forcing load to happen here
-        mx.eval(weights)
+        print(f"data loading clock time: {time.perf_counter() - tic} seconds")
 
-        return weights
+        return data
 
-    def generate_token(self) -> None:
-        token = None
-        for i in range(self.num_layers):
-            offset = i // self.n_weights_per_block
-            number = i % self.n_weights_per_block
-            layer_weights = self.weights[offset][number]
-            remaining_matmuls = self.n_matmuls_per_layer
+    def execute(self) -> None:
+        tic = time.perf_counter()
 
-            if token is None:
-                # 1. only for the first time
-                # 2. eliminates the need for an input
-                # 3. defines a configurable unit of computation per layer: matmul
-                token = mx.matmul(layer_weights, layer_weights)
-                remaining_matmuls -= 1
+        res = mx.identity(self.mat_dim)
+        for i in range(self.n_blocks * self.n_mats_per_block):
+            offset = i // self.n_mats_per_block
+            number = i % self.n_mats_per_block
+            res = mx.matmul(res, self.data[offset][number])
+        mx.eval(res)
 
-            for _ in range(remaining_matmuls):
-                mx.matmul(token, layer_weights)
-        mx.eval(token)
-
-    def generate(self) -> None:
-        print("Generation Started", flush=True)
-        print("=" * 10, flush=True)
-
-        total_latency = 0
-        for i in range(self.n_tokens):
-            tic = time.perf_counter()
-
-            self.generate_token()
-
-            toc = time.perf_counter()
-            latency = toc - tic
-            total_latency += latency
-            print(f"#{i} token generated in {latency} seconds", flush=True)
-
-        print("=" * 10)
-        print(f"AVG t/s: {self.n_tokens / total_latency}")
-        print(f"TOTAL LATENCY: {total_latency} seconds")
+        print(f"computation clock time: {time.perf_counter() - tic} seconds")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="runs llama 2 with mlx_lm")
-    parser.add_argument(
-        "--total-weights-size",
-        "-w",
-        type=int,
-        help="total weights size in GiB",
+    parser = argparse.ArgumentParser(
+        description="a simple yet memory demanding workload"
     )
     parser.add_argument(
-        "--n-load-blocks",
-        "-b",
+        "--data-size",
         type=int,
-        default=1,
-        help="load weights in the specified number separate blocks",
+        default=DEFAULT_DATA_SIZE,
+        help=f"total data size in GB, (defaults to {DEFAULT_DATA_SIZE})",
     )
     parser.add_argument(
-        "--matmuls-per-layer",
-        "-m",
+        "--n-blocks",
         type=int,
-        default=5,  # Q, K, V, Q * K_T, prev_results * V
-        help="number of matrix multiplications to perform per layer",
+        default=DEFAULT_N_BLOCKS,
+        help="load data in the specified number of separate blocks, "
+        + f"(defaults to {DEFAULT_N_BLOCKS})",
     )
     parser.add_argument(
-        "--n-tokens",
-        "-n",
+        "--mat-dim",
         type=int,
-        help="number of tokens to generate",
+        default=DEFAULT_MAT_DIM,
+        help="size of the square matrices to perform multiplications on, "
+        + f"(defaults to {DEFAULT_MAT_DIM})",
     )
     args = parser.parse_args()
 
     mx.set_default_device(mx.gpu)
-    model = RepresentativeWorkload(
-        args.total_weights_size,
-        args.n_load_blocks,
-        args.matmuls_per_layer,
-        args.n_tokens,
+    job = RepresentativeWorkload(
+        args.data_size,
+        args.n_blocks,
+        args.mat_dim,
     )
-    model.generate()
+    job.execute()
