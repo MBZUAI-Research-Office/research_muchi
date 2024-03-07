@@ -9,105 +9,102 @@ import mlx.core as mx
 class RepresentativeWorkload:
 
     DEFAULT_INPUT_M = 32
-    DEFAULT_INPUT_N = 8192
 
-    # mx.random.uniform() is used to produce the weights, of which
-    # the default return dtype is float32. Therefore, the size of
-    # each weights matrix is:
-    # (16384 * 16384 * 4) / (1024 * 1024 * 1024) = 1 GiB
-    DEFAULT_WEIGHTS_M = 8192
-    DEFAULT_WEIGHTS_N = 8192
-    DEFAULT_WEIGHTS_SIZE = 0.25  # in GiB
+    def __init__(
+        self, data_size: int, mat_dim: int, load_sep: bool, log_path: str
+    ) -> None:
+        weights_size = (4 * mat_dim**2) / 1024**3
+        assert data_size % weights_size == 0
+        self.mat_dim = mat_dim
+        self.load_sep = load_sep
+        self.log_path = log_path
+        self.latencies = {}
+        self.weights = self.load_weights(data_size, weights_size, mat_dim)
 
-    def __init__(self, total_weights_size: int, load_by_layer: bool) -> None:
-        """Encapsulates a simple yet memory demanding workload
-
-        Args:
-            total_weights_size (int): size of weights in GiB to load into unified memory.
-        """
-        assert total_weights_size % self.DEFAULT_WEIGHTS_SIZE == 0
-
-        mx.set_default_device(mx.gpu)
-        self.weights = self.load_weights(total_weights_size, load_by_layer)
-
-    def load_weights(self, total_weights_size: int, load_by_layer: bool):
+    def load_weights(self, data_size: int, weights_size: int, mat_dim: int):
         tic = time.perf_counter()
 
-        num_layers = int(total_weights_size / self.DEFAULT_WEIGHTS_SIZE)
-        if load_by_layer:
+        num_weights = int(data_size / weights_size)
+        if self.load_sep:
             weights = []
-            for _ in range(num_layers):
-                weights.append(
-                    mx.random.uniform(
-                        shape=(
-                            self.DEFAULT_WEIGHTS_M,
-                            self.DEFAULT_WEIGHTS_N,
-                        )
-                    )
-                )
+            for _ in range(num_weights):
+                weights.append(mx.random.uniform(shape=(mat_dim, mat_dim)))
         else:
-            weights = mx.random.uniform(
-                shape=(
-                    num_layers,
-                    self.DEFAULT_WEIGHTS_M,
-                    self.DEFAULT_WEIGHTS_N,
-                )
-            )
+            weights = mx.random.uniform(shape=(num_weights, mat_dim, mat_dim))
         mx.eval(weights)
 
-        print(f"LOAD LATENCY: {time.perf_counter() - tic} seconds", flush=True)
-        print("=" * 10, flush=True)
+        self.latencies["load_latency"] = time.perf_counter() - tic
+        print(f"LOAD LATENCY: {self.latencies['load_latency']} seconds", flush=True)
+
         return weights
 
-    def generate_token(self) -> None:
-        token = mx.random.uniform(shape=(self.DEFAULT_INPUT_M, self.DEFAULT_INPUT_N))
+    def execute_step(self) -> None:
+        token = mx.random.uniform(shape=(self.DEFAULT_INPUT_M, self.mat_dim))
         for layer in self.weights:
             token = mx.matmul(token, layer)
         mx.eval(token)
 
-    def generate(self, n_tokens: int) -> None:
-        print("Generation Started", flush=True)
-        print("=" * 10, flush=True)
-
+    def execute(self, n_samples: int) -> None:
         total_latency = 0
-        for i in range(n_tokens):
+        for _ in range(n_samples):
             tic = time.perf_counter()
 
-            self.generate_token()
+            self.execute_step()
 
             toc = time.perf_counter()
             latency = toc - tic
             total_latency += latency
-            print(f"#{i} token generated in {latency} seconds", flush=True)
 
-        print("=" * 10)
-        print(f"AVERAGE LATENCY: {total_latency / n_tokens} seconds")
+        self.latencies["avg_compute_latency"] = total_latency / n_samples
+        self.latencies["total_compute_latency"] = total_latency
+        print(f"AVERAGE LATENCY: {self.latencies['avg_compute_latency']} seconds")
         print(f"TOTAL LATENCY: {total_latency} seconds")
+
+        self.log_to_file()
+
+    def log_to_file(self) -> None:
+        with open(self.log_path, "a") as logs:
+            logs.write(
+                f"{self.latencies['load_latency']},{self.latencies['avg_compute_latency']},{self.latencies['total_compute_latency']}\n"
+            )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="runs llama 2 with mlx_lm")
-    parser.add_argument(
-        "--total-weights-size",
-        "-t",
-        type=int,
-        help="total weights size in GiB",
+    parser = argparse.ArgumentParser(
+        description="a simple yet memory demanding workload"
     )
     parser.add_argument(
-        "--n-tokens",
-        "-n",
+        "--data-size",
         type=int,
-        help="number of tokens to generate",
+        help="size of data in GiB to compute on",
     )
     parser.add_argument(
-        "--load-by-layer",
-        "-l",
+        "--mat-dim",
+        type=int,
+        help="dimension of the square weights matrices to multiply against",
+    )
+    parser.add_argument(
+        "--load-sep",
         action="store_true",
-        help="whether to load each layer's weights separately",
+        help="whether to load each matrix separately (defaults to False)",
+    )
+    parser.add_argument(
+        "--n-samples",
+        type=int,
+        help="number of samples to gather on the workload",
+    )
+    parser.add_argument(
+        "--log-path",
+        type=str,
+        help="path to log file",
     )
     args = parser.parse_args()
 
+    mx.set_default_device(mx.gpu)
     model = RepresentativeWorkload(
-        total_weights_size=args.total_weights_size, load_by_layer=args.load_by_layer
+        data_size=args.data_size,
+        mat_dim=args.mat_dim,
+        load_sep=args.load_sep,
+        log_path=args.log_path,
     )
-    model.generate(args.n_tokens)
+    model.execute(args.n_samples)
