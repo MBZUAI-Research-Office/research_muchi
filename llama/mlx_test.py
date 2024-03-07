@@ -8,15 +8,16 @@ import mlx.core as mx
 
 class RepresentativeWorkload:
 
-    DEFAULT_INPUT_DIM = 32768
+    DEFAULT_INPUT_M = 32
+    DEFAULT_INPUT_N = 8192
 
     # mx.random.uniform() is used to produce the weights, of which
     # the default return dtype is float32. Therefore, the size of
     # each weights matrix is:
-    # (32768 * 32768 * 4) / (1024 * 1024 * 1024) = 4 GiB
-    DEFAULT_WEIGHTS_M = 32768
-    DEFAULT_WEIGHTS_N = 32768
-    DEFAULT_WEIGHTS_SIZE = 4  # in GiB
+    # (16384 * 16384 * 4) / (1024 * 1024 * 1024) = 1 GiB
+    DEFAULT_WEIGHTS_M = 8192
+    DEFAULT_WEIGHTS_N = 8192
+    DEFAULT_WEIGHTS_SIZE = 0.25  # in GiB
 
     def __init__(self, total_weights_size: int, load_by_layer: bool) -> None:
         """Encapsulates a simple yet memory demanding workload
@@ -30,6 +31,8 @@ class RepresentativeWorkload:
         self.weights = self.load_weights(total_weights_size, load_by_layer)
 
     def load_weights(self, total_weights_size: int, load_by_layer: bool):
+        tic = time.perf_counter()
+
         num_layers = int(total_weights_size / self.DEFAULT_WEIGHTS_SIZE)
         if load_by_layer:
             weights = []
@@ -51,12 +54,15 @@ class RepresentativeWorkload:
                 )
             )
         mx.eval(weights)
+
+        print(f"LOAD LATENCY: {time.perf_counter() - tic} seconds", flush=True)
+        print("=" * 10, flush=True)
         return weights
 
-    def generate_token(self, input: mx.array) -> None:
-        token = input
+    def generate_token(self) -> None:
+        token = mx.random.uniform(shape=(self.DEFAULT_INPUT_M, self.DEFAULT_INPUT_N))
         for layer in self.weights:
-            token = mx.maximum(mx.matmul(token, layer), 0)
+            token = mx.matmul(token, layer)
         mx.eval(token)
 
     def generate(self, n_tokens: int) -> None:
@@ -67,8 +73,7 @@ class RepresentativeWorkload:
         for i in range(n_tokens):
             tic = time.perf_counter()
 
-            input = mx.random.uniform(shape=(self.DEFAULT_INPUT_DIM,))
-            self.generate_token(input)
+            self.generate_token()
 
             toc = time.perf_counter()
             latency = toc - tic
@@ -76,7 +81,7 @@ class RepresentativeWorkload:
             print(f"#{i} token generated in {latency} seconds", flush=True)
 
         print("=" * 10)
-        print(f"AVERAGE TOKEN GENERATION SPEED: {n_tokens / total_latency} seconds")
+        print(f"AVERAGE LATENCY: {total_latency / n_tokens} seconds")
         print(f"TOTAL LATENCY: {total_latency} seconds")
 
 
