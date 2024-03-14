@@ -8,7 +8,8 @@ import mlx.core as mx
 
 class RepresentativeWorkload:
 
-    DEFAULT_INPUT_M = 32
+    # 25 matrices/layers, input_m = 32
+    DEFAULT_NUM_MULS = 858993459200
 
     def __init__(
         self, data_size: int, mat_dim: int, load_sep: bool, log_path: str
@@ -18,19 +19,20 @@ class RepresentativeWorkload:
         self.mat_dim = mat_dim
         self.load_sep = load_sep
         self.log_path = log_path
+        self.num_weights = int(data_size / weights_size)
+        self.input_m = int(self.DEFAULT_NUM_MULS / (self.num_weights * mat_dim**2))
         self.latencies = {}
-        self.weights = self.load_weights(data_size, weights_size, mat_dim)
+        self.weights = self.load_weights(mat_dim)
 
-    def load_weights(self, data_size: int, weights_size: int, mat_dim: int):
+    def load_weights(self, mat_dim: int):
         tic = time.perf_counter()
 
-        num_weights = int(data_size / weights_size)
         if self.load_sep:
             weights = []
-            for _ in range(num_weights):
+            for _ in range(self.num_weights):
                 weights.append(mx.random.uniform(shape=(mat_dim, mat_dim)))
         else:
-            weights = mx.random.uniform(shape=(num_weights, mat_dim, mat_dim))
+            weights = mx.random.uniform(shape=(self.num_weights, mat_dim, mat_dim))
         mx.eval(weights)
 
         self.latencies["load_latency"] = time.perf_counter() - tic
@@ -38,21 +40,22 @@ class RepresentativeWorkload:
 
         return weights
 
-    def execute_step(self) -> None:
-        token = mx.random.uniform(shape=(self.DEFAULT_INPUT_M, self.mat_dim))
+    def execute_step(self) -> float:
+        token = mx.random.uniform(shape=(self.input_m, self.mat_dim))
+
+        tic = time.perf_counter()
+
         for layer in self.weights:
             token = mx.matmul(token, layer)
         mx.eval(token)
 
+        toc = time.perf_counter()
+        return toc - tic
+
     def execute(self, n_samples: int) -> None:
         total_latency = 0
         for _ in range(n_samples):
-            tic = time.perf_counter()
-
-            self.execute_step()
-
-            toc = time.perf_counter()
-            latency = toc - tic
+            latency = self.execute_step()
             total_latency += latency
 
         self.latencies["avg_compute_latency"] = total_latency / n_samples
