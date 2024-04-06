@@ -1,4 +1,4 @@
-#!/Users/xiangruike/miniconda3/envs/mlx_perf/bin/python
+#!/Users/xiangruike/miniconda3/envs/mlx_custom/bin/python
 
 import argparse
 
