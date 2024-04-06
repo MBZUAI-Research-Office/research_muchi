@@ -1,4 +1,4 @@
-#!/Users/xiangruike/miniconda3/envs/mlx_perf/bin/python
+#!/Users/xiangruike/miniconda3/envs/mlx_custom/bin/python
 
 import argparse
 import gc
@@ -214,5 +214,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     mx.set_default_device(mx.gpu)
+    # mx.metal.set_cache_limit(0)
     model = RepresentativeWorkload(args)
     model.execute(args.n_samples)
