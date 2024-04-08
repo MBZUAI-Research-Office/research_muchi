@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+service Expert {
+  rpc Execute (Input) returns (Output) {}
+}
+
+message Input {
+  bytes data = 1;
+}
+
+message Output {
+  bytes data = 1;
+}
