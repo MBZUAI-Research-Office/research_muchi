@@ -11,7 +11,7 @@ import test_expert_pb2
 import test_expert_pb2_grpc
 
 NUM_LAYERS = 40
-EMBEDDING_LENGTH = 32768
+EMBEDDING_LENGTH = 6144
 NUM_EXPERTS = 4
 TOP_K = 4
 DUMMY_NP_DATA = np.arange(EMBEDDING_LENGTH, dtype=np.uint16).view(np.float16)
