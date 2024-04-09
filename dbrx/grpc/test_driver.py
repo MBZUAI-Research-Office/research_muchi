@@ -11,15 +11,15 @@ import test_expert_pb2
 import test_expert_pb2_grpc
 
 NUM_LAYERS = 40
-EMBEDDING_LENGTH = 6144
+EMBEDDING_LENGTH = 32768
 NUM_EXPERTS = 4
 TOP_K = 4
 DUMMY_NP_DATA = np.arange(EMBEDDING_LENGTH, dtype=np.uint16).view(np.float16)
 EXPERT_CHANNELS = [
-    "localhost:3000",
-    "localhost:4000",
-    "localhost:5000",
-    "localhost:6000",
+    "169.254.238.2:2000",
+    "169.254.238.4:4000",
+    "169.254.238.5:5000",
+    "169.254.238.6:6000",
 ]
 
 
