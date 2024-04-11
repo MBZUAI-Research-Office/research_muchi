@@ -1,3 +1,5 @@
+#!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
+
 from contextlib import AsyncExitStack
 import argparse
 import asyncio
@@ -15,11 +17,17 @@ EMBEDDING_LENGTH = 6144
 NUM_EXPERTS = 4
 TOP_K = 4
 DUMMY_NP_DATA = np.arange(EMBEDDING_LENGTH, dtype=np.uint16).view(np.float16)
+# EXPERT_CHANNELS = [
+#     "169.254.238.2:2000",
+#     "169.254.238.4:4000",
+#     "169.254.238.5:5000",
+#     "169.254.238.6:6000",
+# ]
 EXPERT_CHANNELS = [
-    "169.254.238.2:2000",
-    "169.254.238.4:4000",
-    "169.254.238.5:5000",
-    "169.254.238.6:6000",
+    "169.254.136.2:2000",
+    "169.254.136.4:4000",
+    "169.254.136.5:5000",
+    "169.254.136.6:6000",
 ]
 
 
@@ -32,12 +40,12 @@ async def execute_on_expert(stub, data, experts_out):
 async def generate(num_tokens: int):
     async with AsyncExitStack() as es:
         expert_channels = [
-            await es.enter_async_context(grpc.aio.insecure_channel(url)) for url in EXPERT_CHANNELS
+            await es.enter_async_context(grpc.aio.insecure_channel(url))
+            for url in EXPERT_CHANNELS
         ]
-        experts = {
-            i: test_expert_pb2_grpc.ExpertStub(channel)
-            for i, channel in enumerate(expert_channels)
-        }
+        experts = [
+            test_expert_pb2_grpc.ExpertStub(channel) for channel in expert_channels
+        ]
         latencies = []
 
         for i in range(num_tokens):

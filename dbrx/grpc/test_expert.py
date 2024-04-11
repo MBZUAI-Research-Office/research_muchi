@@ -1,3 +1,5 @@
+#!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
+
 import argparse
 import asyncio
 import logging
