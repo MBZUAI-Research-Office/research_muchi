@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11test_expert.proto\"\x15\n\x05Input\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\"\x16\n\x06Output\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x32&\n\x06\x45xpert\x12\x1c\n\x07\x45xecute\x12\x06.Input\x1a\x07.Output\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11test_expert.proto\"C\n\x05Input\x12\x11\n\tblock_num\x18\x01 \x01(\x05\x12\x19\n\x11\x61\x63tivated_experts\x18\x02 \x01(\x0c\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\"\x16\n\x06Output\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x32&\n\x06\x45xpert\x12\x1c\n\x07\x45xecute\x12\x06.Input\x1a\x07.Output\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -22,9 +22,9 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'test_expert_pb2', _globals)
 if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _globals['_INPUT']._serialized_start=21
-  _globals['_INPUT']._serialized_end=42
-  _globals['_OUTPUT']._serialized_start=44
-  _globals['_OUTPUT']._serialized_end=66
-  _globals['_EXPERT']._serialized_start=68
-  _globals['_EXPERT']._serialized_end=106
+  _globals['_INPUT']._serialized_end=88
+  _globals['_OUTPUT']._serialized_start=90
+  _globals['_OUTPUT']._serialized_end=112
+  _globals['_EXPERT']._serialized_start=114
+  _globals['_EXPERT']._serialized_end=152
 # @@protoc_insertion_point(module_scope)

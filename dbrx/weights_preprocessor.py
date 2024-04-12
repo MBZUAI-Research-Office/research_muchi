@@ -6,18 +6,20 @@ import gc
 import glob
 import json
 import logging
-
-# for DEV
-import pprint
+import time
 
 import mlx.core as mx
 
 
 class WeightsPreprocessor:
 
-    def __init__(self, model_path: str, output_dir: str) -> None:
+    def __init__(
+        self, model_path: str, output_dir: str, batch: bool, clean_sep: bool
+    ) -> None:
         self.model_path = Path(model_path)
         self.output_dir = self.model_path / output_dir
+        self.batch = batch
+        self.clean_sep = clean_sep
 
     def categorize_files(self) -> dict:
         try:
@@ -47,7 +49,7 @@ class WeightsPreprocessor:
                 weights.update(mx.load(wf))
         return weights
 
-    def process_layer(self, layer_num: str, weights: dict, num_experts: int):
+    def process_layer(self, layer_num: str, weights: dict, num_experts: int) -> None:
         # a file can contain weights from multiple layers as well as non-layer weights
         layer_weights = {
             "attention_and_router": {},
@@ -69,8 +71,9 @@ class WeightsPreprocessor:
             # split expert weights
             linear_layer_name = name_split[-1]
             for i, expert in enumerate(mx.split(weight, num_experts, axis=0)):
+                # TODO: original safetensors omit .weights
                 layer_weights["experts"][i][
-                    f"experts.{i}.{linear_layer_name}.weight"
+                    f"blocks.{layer_num}.experts.{i}.{linear_layer_name}.weight"
                 ] = (expert.T if linear_layer_name == "w2" else expert)
 
         mx.savez(
@@ -89,7 +92,7 @@ class WeightsPreprocessor:
         del layer_weights
         gc.collect()
 
-    def process_non_layer(self, weights: dict):
+    def process_non_layer(self, weights: dict) -> None:
         non_layer_weights = {
             k: v for k, v in weights.items() if not k.startswith("transformer.blocks")
         }
@@ -101,7 +104,53 @@ class WeightsPreprocessor:
         del non_layer_weights
         gc.collect()
 
-    def start(self):
+    def clean_if_told(self, sep_paths: list[Path]) -> None:
+        if self.clean_sep:
+            for path in sep_paths:
+                path.unlink()
+
+    def combine_experts(self, num_layers: int, num_experts: int) -> None:
+        for i in range(num_experts):
+            expert_weights = {}
+            sep_paths = []
+            for j in range(num_layers):
+                path = self.output_dir / f"block{j}-expert{i}.npz"
+                expert_weights.update(mx.load(str(path)))
+                sep_paths.append(path)
+
+            mx.savez(self.output_dir / f"expert{i}.npz", **expert_weights)
+            print(f"batched expert {i} weights")
+
+            self.clean_if_told(sep_paths)
+
+            # forces python to free up memory
+            del expert_weights
+            del sep_paths
+            gc.collect()
+
+    def combine_non_experts(self, num_layers: int) -> None:
+        non_expert_weights = {}
+        sep_paths = []
+        for i in range(num_layers):
+            path = self.output_dir / f"block{i}-attention-and-router.npz"
+            non_expert_weights.update(mx.load(str(path)))
+            sep_paths.append(path)
+
+        non_layer_path = self.output_dir / f"non-layer.npz"
+        non_expert_weights.update(mx.load(str(non_layer_path)))
+        sep_paths.append(non_layer_path)
+
+        mx.savez(self.output_dir / f"non-expert.npz", **non_expert_weights)
+        print(f"batched non-expert weights")
+
+        self.clean_if_told(sep_paths)
+
+        # forces python to free up memory
+        del non_expert_weights
+        del sep_paths
+        gc.collect()
+
+    def start(self) -> None:
         try:
             with open(self.model_path / "config.json", "r") as f:
                 config = json.load(f)
@@ -114,23 +163,49 @@ class WeightsPreprocessor:
             logging.error(f"No safetensors found in {self.model_path}")
             raise FileNotFoundError(f"No safetensors found in {self.model_path}")
 
+        print("=" * 20)
+        print("WEIGHTS PREPROCESSOR STARTED")
+        tic = time.perf_counter()
+
+        num_layers = config["n_layers"]
+        num_experts = config["ffn_config"]["moe_num_experts"]
         categorization = self.categorize_files()
         for i in categorization["layer"]:
             self.process_layer(
                 i,
                 self.load_weights_in_map(weight_files, categorization["layer"][i]),
-                config["ffn_config"]["moe_num_experts"],
+                num_experts,
             )
         self.process_non_layer(
             self.load_weights_in_map(weight_files, categorization["non_layer"])
         )
+
+        print(
+            "weights re-organized by layer and expert in "
+            + f"{time.perf_counter() - tic} sec(s)"
+        )
+
+        if self.batch:
+            tic = time.perf_counter()
+
+            self.combine_experts(num_layers, num_experts)
+            self.combine_non_experts(num_layers)
+
+            print(f"weights batched in {time.perf_counter() - tic} sec(s)")
+
+        print("=" * 20)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str)
     parser.add_argument("--output-dir", type=str)
+    parser.add_argument("--batch", action="store_true")
+    parser.add_argument("--clean-sep", action="store_true")
     args = parser.parse_args()
     logging.basicConfig()
-    weights_processor = WeightsPreprocessor(args.model_path, args.output_dir)
-    weights_processor.start()
+
+    weights_preprocessor = WeightsPreprocessor(
+        args.model_path, args.output_dir, args.batch, args.clean_sep
+    )
+    weights_preprocessor.start()

@@ -5,10 +5,14 @@ from typing import ClassVar as _ClassVar, Optional as _Optional
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class Input(_message.Message):
-    __slots__ = ("data",)
+    __slots__ = ("block_num", "activated_experts", "data")
+    BLOCK_NUM_FIELD_NUMBER: _ClassVar[int]
+    ACTIVATED_EXPERTS_FIELD_NUMBER: _ClassVar[int]
     DATA_FIELD_NUMBER: _ClassVar[int]
+    block_num: int
+    activated_experts: bytes
     data: bytes
-    def __init__(self, data: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, block_num: _Optional[int] = ..., activated_experts: _Optional[bytes] = ..., data: _Optional[bytes] = ...) -> None: ...
 
 class Output(_message.Message):
     __slots__ = ("data",)

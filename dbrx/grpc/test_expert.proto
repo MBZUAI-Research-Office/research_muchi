@@ -5,7 +5,9 @@ service Expert {
 }
 
 message Input {
-  bytes data = 1;
+  int32 block_num = 1;
+  bytes activated_experts = 2;
+  bytes data = 3;
 }
 
 message Output {
