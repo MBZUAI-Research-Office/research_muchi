@@ -65,7 +65,8 @@ class WeightsPreprocessor:
                 continue
 
             if "experts.mlp" not in name:
-                layer_weights["attention_and_router"][name] = weight
+                # len("transformer.") == 12, for our re-written model
+                layer_weights["attention_and_router"][name[12:]] = weight
                 continue
 
             # split expert weights
@@ -93,9 +94,12 @@ class WeightsPreprocessor:
         gc.collect()
 
     def process_non_layer(self, weights: dict) -> None:
-        non_layer_weights = {
-            k: v for k, v in weights.items() if not k.startswith("transformer.blocks")
-        }
+        non_layer_weights = {}
+        for k, v in weights.items():
+            if not k.startswith("transformer.blocks"):
+                # for our re-written model
+                non_layer_weights[k[12:] if k.startswith("transformer.") else k] = v
+
         mx.savez(self.output_dir / f"non-layer.npz", **non_layer_weights)
         print(f"processed non-layer weights")
 

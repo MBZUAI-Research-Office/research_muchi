@@ -8,8 +8,8 @@ import json
 import logging
 
 import grpc
-import test_expert_pb2
-import test_expert_pb2_grpc
+import moe_shard_pb2
+import moe_shard_pb2_grpc
 
 import numpy as np
 
@@ -67,28 +67,27 @@ class DistributedDBRX(nn.Module):
     ) -> np.array:
         # conversion is needed since NumPy does not support bfloat16 arrays
         # see: https://ml-explore.github.io/mlx/build/html/usage/numpy.html
-        return np.array(
-            self.blocks[block_num](
-                activated_experts, mx.array(inputs, dtype=mx.bfloat16)
-            ).astype(mx.float32)
+        outputs = self.blocks[block_num](
+            activated_experts, mx.array(inputs, dtype=mx.bfloat16)
         )
+        return np.array(outputs.astype(mx.float32))
 
 
-class ExpertServicer(test_expert_pb2_grpc.ExpertServicer):
+class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
 
     def __init__(self, model_path: str) -> None:
         self.model_path = Path(model_path)
         self.model = self.load_model()
 
     async def Execute(
-        self, request: test_expert_pb2.Input, context: grpc.aio.ServicerContext
+        self, request: moe_shard_pb2.Inputs, context: grpc.aio.ServicerContext
     ):
         outputs = self.model(
             request.block_num,
             np.frombuffer(request.activated_experts, dtype=np.int64),
             np.frombuffer(request.data, dtype=np.float32),
         )
-        return test_expert_pb2.Output(data=outputs.tobytes())
+        return moe_shard_pb2.Outputs(data=outputs.tobytes())
 
     def load_model(self) -> nn.Module:
         try:
@@ -114,17 +113,19 @@ class ExpertServicer(test_expert_pb2_grpc.ExpertServicer):
 
 async def serve(port: int, model_path: str):
     server = grpc.aio.server()
-    test_expert_pb2_grpc.add_ExpertServicer_to_server(ExpertServicer(model_path), server)
+    moe_shard_pb2_grpc.add_MoeShardServicer_to_server(
+        MoeShardServicer(model_path), server
+    )
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
-    logging.info("Starting server on %s", listen_addr)
+    logging.info(f"Starting server on {listen_addr}")
     await server.start()
     await server.wait_for_termination()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=3000)
+    parser.add_argument("--port", type=int)
     parser.add_argument("--model-path", type=str)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)

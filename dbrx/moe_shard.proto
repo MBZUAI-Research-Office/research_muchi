@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+service MoeShard {
+  rpc Execute (Inputs) returns (Outputs) {}
+}
+
+message Inputs {
+  int32 block_num = 1;
+  bytes activated_experts = 2;
+  bytes data = 3;
+}
+
+message Outputs {
+  bytes data = 1;
+}
