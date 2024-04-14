@@ -2,7 +2,8 @@
 
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from pathlib import Path
+from typing import Generator, Optional, Tuple
 import argparse
 import asyncio
 import json
@@ -18,7 +19,15 @@ import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
 
+from transformers import AutoTokenizer, PreTrainedTokenizer
+
 from base import BaseModelArgs
+from sample_utils import top_p_sampling
+
+DEFAULT_PROMPT = "hello"
+DEFAULT_MAX_TOKENS = 100
+DEFAULT_TEMP = 0.6
+DEFAULT_TOP_P = 1.0
 
 
 @dataclass
@@ -29,7 +38,6 @@ class ModelArgs(BaseModelArgs):
     attn_config: dict
     n_layers: int
     n_heads: int
-    moe_shards: list[moe_shard_pb2_grpc.MoeShardStub]
 
 
 class Attention(nn.Module):
@@ -127,8 +135,8 @@ class DistributedSparseMoeBlock(nn.Module):
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
 
         # shards are moe_shard_pb2_grpc.MoeShardStub and thus cannot be dict key
-        self.expert_to_shard = args.ffn_config["expert_to_shard_num"]
-        self.shards = args.moe_shards
+        self.expert_to_shard = args.ffn_config["expert_to_shard"]
+        self.shards = args.ffn_config["moe_shards"]
 
         self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
@@ -201,7 +209,7 @@ class DistributedDecoderLayer(nn.Module):
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
         r, h, cache = self.norm_attn_norm(x, mask, cache)
-        out = self.ffn(h, self.block_num) + r
+        out = asyncio.run(self.ffn(h, self.block_num)) + r
         return out, cache
 
 
@@ -236,172 +244,103 @@ class DistributedDBRX(nn.Module):
         return self.lm_head(self.norm_f(h)), cache
 
 
-def load_model(self) -> nn.Module:
-    # shards = [moe_shard_pb2_grpc.MoeShardStub(channel) for channel in channels]
-    # {
-    #     0: shard[0],
-    #     1: shard[0],
-    #     ...
-    #     4: shard[1]
-    # }
-    try:
-        with open(self.model_path / "driver_config.json", "r") as f:
-            config = json.load(f)
-    except FileNotFoundError:
-        logging.error(f"shard_config.json not found in {self.model_path}")
-        raise
+class Driver:
+    def __init__(self, model_path: str) -> None:
+        self.model_path = Path(model_path)
 
-    model_args = ModelArgs.from_dict(config)
-    model = DistributedDBRX(model_args)
+    def get_model_args(self) -> ModelArgs:
+        try:
+            with open(self.model_path / "driver_config.json", "r") as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            logging.error(f"driver_config.json not found in {self.model_path}")
+            raise
 
-    weights = {}
-    for i in model_args.ffn_config["assigned_experts"]:
-        weights.update(mx.load(str(self.model_path / f"expert{i}.npz")))
+        model_args = ModelArgs.from_dict(config)
 
-    model.load_weights(list(weights.items()))
-    mx.eval(model.parameters())
-    model.eval()
+        model_args.ffn_config["expert_to_shard"] = {}
+        model_args.ffn_config["moe_shards"] = []
+        for url, experts in model_args.ffn_config["moe_shard_map"].items():
+            model_args.ffn_config["moe_shards"].append(url)
+            shard_i = len(model_args.ffn_config["moe_shards"]) - 1
 
-    return model
+            for e in experts:
+                model_args.ffn_config["expert_to_shard"][e] = shard_i
 
-def generate_step(
-    prompt: mx.array,
-    model: nn.Module,
-    temp: float = 0.0,
-    repetition_penalty: Optional[float] = None,
-    repetition_context_size: Optional[int] = 20,
-    top_p: float = 1.0,
-) -> Generator[Tuple[mx.array, mx.array], None, None]:
-    """
-    A generator producing text based on the given prompt from the model.
+        del model_args.ffn_config["moe_shard_map"]
 
-    Args:
-        prompt (mx.array): The input prompt.
-        model (nn.Module): The model to use for generation.
-        temp (float): The temperature for sampling, if 0 the argmax is used.
-        repetition_penalty (float, optional): The penalty factor for repeating tokens.
-        repetition_context_size (int, optional): The number of tokens to consider for repetition penalty (default 20).
-        top_p (float, optional): Nulceus sampling, higher means model considers more less likely words
+        return model_args
 
-    Yields:
-        Generator[Tuple[mx.array, mx.array]]: A generator producing
-        one token and probability per call.
-    """
+    def generate_step(
+        self,
+        model: nn.Module,
+        prompt: mx.array,
+        temp: float,
+        top_p: float,
+    ) -> Generator[Tuple[mx.array, mx.array], None, None]:
 
-    def sample(logits: mx.array) -> Tuple[mx.array, float]:
-        softmax_logits = mx.softmax(logits)
+        def sample(logits: mx.array) -> Tuple[mx.array, float]:
+            softmax_logits = mx.softmax(logits)
 
-        if temp == 0:
-            token = mx.argmax(logits, axis=-1)
-        else:
-            if top_p > 0 and top_p < 1.0:
-                token = top_p_sampling(logits, top_p, temp)
+            if temp == 0:
+                token = mx.argmax(logits, axis=-1)
             else:
-                token = mx.random.categorical(logits * (1 / temp))
+                if top_p > 0 and top_p < 1.0:
+                    token = top_p_sampling(logits, top_p, temp)
+                else:
+                    token = mx.random.categorical(logits * (1 / temp))
 
-        prob = softmax_logits[0, token]
-        return token, prob
+            prob = softmax_logits[0, token]
+            return token, prob
 
-    if repetition_penalty and (
-        repetition_penalty < 0 or not isinstance(repetition_penalty, float)
-    ):
-        raise ValueError(
-            f"repetition_penalty must be a non-negative float, got {repetition_penalty}"
-        )
+        y = prompt
+        cache = None
 
-    y = prompt
-    cache = None
-
-    repetition_context = prompt.tolist()
-
-    if repetition_context_size:
-        repetition_context = repetition_context[-repetition_context_size:]
-
-    while True:
-        logits, cache = model(y[None], cache=cache)
-        logits = logits[:, -1, :]
-
-        if repetition_penalty:
-            logits = apply_repetition_penalty(
-                logits, repetition_context, repetition_penalty
-            )
+        while True:
+            logits, cache = model(y[None], cache=cache)
+            logits = logits[:, -1, :]
             y, prob = sample(logits)
-            repetition_context.append(y.item())
-        else:
-            y, prob = sample(logits)
+            yield y, prob
 
-        if repetition_context_size:
-            if len(repetition_context) > repetition_context_size:
-                repetition_context = repetition_context[-repetition_context_size:]
-        yield y, prob
-
-
-def generate(
-    model: nn.Module,
-    tokenizer: PreTrainedTokenizer,
-    prompt: str,
-    temp: float = 0.0,
-    max_tokens: int = 100,
-    verbose: bool = False,
-    formatter: Optional[Callable] = None,
-    repetition_penalty: Optional[float] = None,
-    repetition_context_size: Optional[int] = None,
-    top_p: float = 1.0,
-) -> str:
-    """
-    Generate text from the model.
-
-    Args:
-       model (nn.Module): The language model.
-       tokenizer (PreTrainedTokenizer): The tokenizer.
-       prompt (str): The string prompt.
-       temp (float): The temperature for sampling (default 0).
-       max_tokens (int): The maximum number of tokens (default 100).
-       verbose (bool): If ``True``, print tokens and timing information
-           (default ``False``).
-       formatter (Optional[Callable]): A function which takes a token and a
-           probability and displays it.
-       repetition_penalty (float, optional): The penalty factor for repeating tokens.
-       repetition_context_size (int, optional): The number of tokens to consider for repetition penalty.
-    """
-
-    if verbose:
+    def generate(
+        self,
+        model: nn.Module,
+        tokenizer: PreTrainedTokenizer,
+        prompt: str,
+        max_tokens: int,
+        temp: float,
+        top_p: float,
+    ) -> str:
         print("=" * 10)
         print("Prompt:", prompt)
 
-    prompt_tokens = mx.array(tokenizer.encode(prompt))
+        prompt_tokens = mx.array(tokenizer.encode(prompt))
 
-    tic = time.perf_counter()
-    tokens = []
-    token_strings = []
-    skip = 0
-    REPLACEMENT_CHAR = "\ufffd"
+        tic = time.perf_counter()
+        tokens = []
+        token_strings = []
+        skip = 0
+        REPLACEMENT_CHAR = "\ufffd"
 
-    for (token, prob), n in zip(
-        generate_step(
-            prompt_tokens,
-            model,
-            temp,
-            repetition_penalty,
-            repetition_context_size,
-            top_p,
-        ),
-        range(max_tokens),
-    ):
-        token = token.item()
-        if n == 0:
-            prompt_time = time.perf_counter() - tic
-            tic = time.perf_counter()
-        if token == tokenizer.eos_token_id:
-            break
-        tokens.append(token)
+        for (token, prob), n in zip(
+            self.generate_step(
+                model,
+                prompt_tokens,
+                temp,
+                top_p,
+            ),
+            range(max_tokens),
+        ):
+            token = token.item()
+            if n == 0:
+                prompt_time = time.perf_counter() - tic
+                tic = time.perf_counter()
+            if token == tokenizer.eos_token_id:
+                break
+            tokens.append(token)
 
-        if verbose:
             s = tokenizer.decode(tokens)
-            if formatter:
-                formatter(s[skip:], prob.item())
-                skip = len(s)
-            elif s[-1] != REPLACEMENT_CHAR:
+            if s[-1] != REPLACEMENT_CHAR:
                 print(s[skip:], end="", flush=True)
                 skip = len(s)
             # Reset token cache at line break
@@ -410,10 +349,9 @@ def generate(
                 token_strings.append(s)
                 skip = 0
 
-    token_count = n + 1
-    token_strings.append(tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, ""))
+        token_count = n + 1
+        token_strings.append(tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, ""))
 
-    if verbose:
         print(token_strings[-1][skip:], flush=True)
         gen_time = time.perf_counter() - tic
         print("=" * 10)
@@ -425,51 +363,55 @@ def generate(
         print(f"Prompt: {prompt_tps:.3f} tokens-per-sec")
         print(f"Generation: {gen_tps:.3f} tokens-per-sec")
 
-    return "".join(token_strings)
+        return "".join(token_strings)
 
-async def generate(num_tokens: int):
-    async with AsyncExitStack() as es:
-        expert_channels = [
-            await es.enter_async_context(grpc.aio.insecure_channel(url))
-            for url in EXPERT_CHANNELS
-        ]
-        experts = [
-            moe_shard_pb2_grpc.MoeShardStub(channel) for channel in expert_channels
-        ]
-        latencies = []
+    async def start(
+        self, prompt: str, max_tokens: int, temp: float, top_p: float
+    ) -> None:
+        async with AsyncExitStack() as es:
+            model_args = self.get_model_args()
+            shard_channels = [
+                await es.enter_async_context(grpc.aio.insecure_channel(url))
+                for url in model_args.ffn_config["moe_shards"]
+            ]
+            model_args.ffn_config["moe_shards"] = [
+                moe_shard_pb2_grpc.MoeShardStub(channel) for channel in shard_channels
+            ]
 
-        for i in range(num_tokens):
-            token_latency = 0
-            for j in range(NUM_LAYERS):
-                # chosen_experts = np.random.randint(0, NUM_EXPERTS, size=TOP_K)
-                chosen_experts = [0]  # TODO: naming change
-                activated_experts = np.array([0, 1, 2, 3])
-                outputs = []
-                tic = time.perf_counter()
+            model = DistributedDBRX(model_args)
+            weights = mx.load(str(self.model_path / f"non-expert.npz"))
+            model.load_weights(list(weights.items()))
+            mx.eval(model.parameters())
+            model.eval()
 
-                async with asyncio.TaskGroup() as tg:
-                    for k in chosen_experts:
-                        tg.create_task(
-                            execute_on_expert(
-                                experts[k], j, activated_experts, DUMMY_NP_DATA, outputs
-                            )
-                        )
+            tokenizer = AutoTokenizer.from_pretrained(self.model_path)
 
-                token_latency += time.perf_counter() - tic
-            latencies.append(token_latency)
-
-        print("=" * 20)
-        print(f"NUM LAYERS: {NUM_LAYERS}")
-        print(f"EMBEDDING_LENGTH: {EMBEDDING_LENGTH}")
-        print(f"TOP K: {TOP_K}")
-        print(f"token latencies:\n{latencies}")
-        print(f"average: {np.mean(latencies)} sec(s)")
-        print("=" * 20)
+            self.generate(model, tokenizer, prompt, max_tokens, temp, top_p)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-tokens", type=int, default=1)
+    parser.add_argument("--model-path", type=str, help="Path to local model directory")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=DEFAULT_PROMPT,
+        help="Message to be processed by the model",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="Maximum number of tokens to generate",
+    )
+    parser.add_argument(
+        "--temp", type=float, default=DEFAULT_TEMP, help="Sampling temperature"
+    )
+    parser.add_argument(
+        "--top-p", type=float, default=DEFAULT_TOP_P, help="Sampling top-p"
+    )
     args = parser.parse_args()
+
     logging.basicConfig()
-    asyncio.run(generate(args.num_tokens))
+    driver = Driver(args.model_path)
+    driver.start(args.prompt, args.max_tokens, args.temp, args.top_p)
