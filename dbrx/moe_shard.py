@@ -91,10 +91,10 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
 
     def load_model(self) -> nn.Module:
         try:
-            with open(self.model_path / "shard_config.json", "r") as f:
+            with open(self.model_path / "moe_shard_config.json", "r") as f:
                 config = json.load(f)
         except FileNotFoundError:
-            logging.error(f"shard_config.json not found in {self.model_path}")
+            logging.error(f"moe_shard_config.json not found in {self.model_path}")
             raise
 
         model_args = ModelArgs.from_dict(config)
