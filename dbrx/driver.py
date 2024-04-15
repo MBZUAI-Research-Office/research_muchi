@@ -133,6 +133,7 @@ class Router(nn.Module):
 class DistributedSparseMoeBlock(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
+        self.d_model = args.d_model
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
 
         # shards are moe_shard_pb2_grpc.MoeShardStub and thus cannot be dict key
@@ -146,7 +147,7 @@ class DistributedSparseMoeBlock(nn.Module):
         shard: moe_shard_pb2_grpc.MoeShardStub,
         block_num: int,
         activated_experts: list,
-        x: mx.array,
+        x: mx.array,  # 1-dimensional
     ):
         outputs = await shard.Execute(
             moe_shard_pb2.Inputs(
@@ -155,9 +156,11 @@ class DistributedSparseMoeBlock(nn.Module):
                 data=np.array(x.astype(mx.float32)).tobytes(),
             )
         )
-        return mx.array(
-            np.frombuffer(outputs.data, dtype=np.float32), dtype=mx.bfloat16
+        # reshape because np.frombuffer() interprets a buffer as a 1-dimensional array
+        outputs = np.frombuffer(outputs.data, dtype=np.float32).reshape(
+            (len(activated_experts), self.d_model)
         )
+        return mx.array(outputs, dtype=mx.bfloat16)
 
     async def __call__(self, x: mx.array, block_num: int) -> mx.array:
         ne = self.num_experts_per_tok
@@ -177,7 +180,7 @@ class DistributedSparseMoeBlock(nn.Module):
             shard_to_experts = {}
             for e in it:
                 shard_to_experts.setdefault(self.expert_to_shard[e], []).append(e)
-            print(shard_to_experts)
+
             async with asyncio.TaskGroup() as tg:
                 shard_tasks = [
                     tg.create_task(
@@ -188,8 +191,9 @@ class DistributedSparseMoeBlock(nn.Module):
                     for si, activated_experts in shard_to_experts.items()
                 ]
 
-            yt = mx.stack(mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1)
-            print([task.result().shape for task in shard_tasks])
+            yt = mx.stack(
+                mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1
+            )
             yt = (yt * st).sum(axis=-1)
             y.append(yt)
         y = mx.stack(y, axis=0)

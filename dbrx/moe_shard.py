@@ -71,7 +71,6 @@ class DistributedDBRX(nn.Module):
         outputs = self.blocks[block_num](
             activated_experts, mx.array(inputs, dtype=mx.bfloat16)
         )
-        print(outputs)
         return np.array(outputs.astype(mx.float32))
 
 
