@@ -48,7 +48,7 @@ class DistributedSparseMoeBlock(nn.Module):
         # because nn.Module.load_weights does not work with dicts : (
         self.expert_to_i = args.ffn_config["expert_to_i"]
 
-        self.experts = [MLP(self.d_model, self.ffn_dim) for _ in len(self.expert_to_i)]
+        self.experts = [MLP(self.d_model, self.ffn_dim) for _ in self.expert_to_i]
 
     def __call__(self, activated_experts: np.array, x: mx.array) -> mx.array:
         return mx.array(
