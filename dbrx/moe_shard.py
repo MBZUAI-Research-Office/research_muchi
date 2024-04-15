@@ -45,14 +45,15 @@ class DistributedSparseMoeBlock(nn.Module):
         super().__init__()
         self.d_model = args.d_model
         self.ffn_dim = args.ffn_config["ffn_hidden_size"]
-        self.assigned_experts = args.ffn_config["assigned_experts"]
+        # because nn.Module.load_weights does not work with dicts : (
+        self.expert_to_i = args.ffn_config["expert_to_i"]
 
-        self.experts = {
-            i: MLP(self.d_model, self.ffn_dim) for i in self.assigned_experts
-        }
+        self.experts = [MLP(self.d_model, self.ffn_dim) for _ in len(self.expert_to_i)]
 
     def __call__(self, activated_experts: np.array, x: mx.array) -> mx.array:
-        return mx.array([self.experts[i](x) for i in activated_experts])
+        return mx.array(
+            [self.experts[self.expert_to_i[e]](x) for e in activated_experts]
+        )
 
 
 class DistributedDBRX(nn.Module):
@@ -98,12 +99,19 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
             raise
 
         model_args = ModelArgs.from_dict(config)
-        model = DistributedDBRX(model_args)
 
+        model_args.ffn_config["expert_to_i"] = {}
         weights = {}
-        for i in model_args.ffn_config["assigned_experts"]:
-            weights.update(mx.load(str(self.model_path / f"expert{i}.npz")))
+        for i, e in enumerate(model_args.ffn_config["assigned_experts"]):
+            model_args.ffn_config["expert_to_i"][e] = i
+            for k, v in mx.load(str(self.model_path / f"expert{e}.npz")).items():
+                k_splits = k.split(".")
+                k_splits[3] = str(i)
+                weights[".".join(k_splits)] = v
 
+        del model_args.ffn_config["assigned_experts"]
+
+        model = DistributedDBRX(model_args)
         model.load_weights(list(weights.items()))
         mx.eval(model.parameters())
         model.eval()
