@@ -1,5 +1,6 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
+from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -176,9 +177,9 @@ class DistributedSparseMoeBlock(nn.Module):
             shard_to_experts = {}
             for e in it:
                 shard_to_experts.setdefault(self.expert_to_shard[e], []).append(e)
-
+            print(shard_to_experts)
             async with asyncio.TaskGroup() as tg:
-                yt = [
+                shard_tasks = [
                     tg.create_task(
                         self.execute_on_shard(
                             self.shards[si], block_num, activated_experts, xt
@@ -187,7 +188,8 @@ class DistributedSparseMoeBlock(nn.Module):
                     for si, activated_experts in shard_to_experts.items()
                 ]
 
-            yt = mx.stack(mx.concatenate(yt, axis=0), axis=-1)
+            yt = mx.stack(mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1)
+            print([task.result().shape for task in shard_tasks])
             yt = (yt * st).sum(axis=-1)
             y.append(yt)
         y = mx.stack(y, axis=0)
@@ -202,14 +204,14 @@ class DistributedDecoderLayer(nn.Module):
         self.norm_attn_norm = NormAttnNorm(args)
         self.block_num = block_num
 
-    def __call__(
+    async def __call__(
         self,
         x: mx.array,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
         r, h, cache = self.norm_attn_norm(x, mask, cache)
-        out = asyncio.run(self.ffn(h, self.block_num)) + r
+        out = (await self.ffn(h, self.block_num)) + r
         return out, cache
 
 
@@ -222,7 +224,7 @@ class DistributedDBRX(nn.Module):
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
         self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
 
-    def __call__(
+    async def __call__(
         self,
         inputs: mx.array,
         cache=None,
@@ -239,7 +241,7 @@ class DistributedDBRX(nn.Module):
             cache = [None] * len(self.blocks)
 
         for e, layer in enumerate(self.blocks):
-            h, cache[e] = layer(h, mask, cache[e])
+            h, cache[e] = await layer(h, mask, cache[e])
 
         return self.lm_head(self.norm_f(h)), cache
 
@@ -271,13 +273,13 @@ class Driver:
 
         return model_args
 
-    def generate_step(
+    async def generate_step(
         self,
         model: nn.Module,
         prompt: mx.array,
         temp: float,
         top_p: float,
-    ) -> Generator[Tuple[mx.array, mx.array], None, None]:
+    ) -> AsyncGenerator[Tuple[mx.array, mx.array]]:
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
             softmax_logits = mx.softmax(logits)
@@ -297,12 +299,12 @@ class Driver:
         cache = None
 
         while True:
-            logits, cache = model(y[None], cache=cache)
+            logits, cache = await model(y[None], cache=cache)
             logits = logits[:, -1, :]
             y, prob = sample(logits)
             yield y, prob
 
-    def generate(
+    async def generate(
         self,
         model: nn.Module,
         tokenizer: PreTrainedTokenizer,
@@ -322,15 +324,16 @@ class Driver:
         skip = 0
         REPLACEMENT_CHAR = "\ufffd"
 
-        for (token, prob), n in zip(
-            self.generate_step(
-                model,
-                prompt_tokens,
-                temp,
-                top_p,
-            ),
-            range(max_tokens),
+        n = 0
+        async for token, prob in self.generate_step(
+            model,
+            prompt_tokens,
+            temp,
+            top_p,
         ):
+            if n >= max_tokens:
+                break
+
             token = token.item()
             if n == 0:
                 prompt_time = time.perf_counter() - tic
@@ -348,6 +351,8 @@ class Driver:
                 tokens = []
                 token_strings.append(s)
                 skip = 0
+
+            n += 1
 
         token_count = n + 1
         token_strings.append(tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, ""))
@@ -384,9 +389,11 @@ class Driver:
             mx.eval(model.parameters())
             model.eval()
 
-            tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            tokenizer = AutoTokenizer.from_pretrained(
+                self.model_path, trust_remote_code=True
+            )
 
-            self.generate(model, tokenizer, prompt, max_tokens, temp, top_p)
+            await self.generate(model, tokenizer, prompt, max_tokens, temp, top_p)
 
 
 if __name__ == "__main__":
@@ -414,4 +421,4 @@ if __name__ == "__main__":
 
     logging.basicConfig()
     driver = Driver(args.model_path)
-    driver.start(args.prompt, args.max_tokens, args.temp, args.top_p)
+    asyncio.run(driver.start(args.prompt, args.max_tokens, args.temp, args.top_p))

@@ -5,3 +5,4 @@ mlx
 transformers
 torch
 torchvision
+tiktoken
