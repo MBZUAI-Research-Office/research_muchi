@@ -14,11 +14,11 @@ import mlx.core as mx
 class WeightsPreprocessor:
 
     def __init__(
-        self, model_path: str, output_dir: str, batch: bool, clean_sep: bool
+        self, model_path: str, output_dir: str, batching_strategy: int, clean_sep: bool
     ) -> None:
         self.model_path = Path(model_path)
         self.output_dir = self.model_path / output_dir
-        self.batch = batch
+        self.batching_strategy = batching_strategy
         self.clean_sep = clean_sep
 
     def categorize_files(self) -> dict:
@@ -113,7 +113,7 @@ class WeightsPreprocessor:
             for path in sep_paths:
                 path.unlink()
 
-    def combine_experts(self, num_layers: int, num_experts: int) -> None:
+    def batch_experts(self, num_layers: int, num_experts: int) -> None:
         for i in range(num_experts):
             expert_weights = {}
             sep_paths = []
@@ -122,7 +122,28 @@ class WeightsPreprocessor:
                 expert_weights.update(mx.load(str(path)))
                 sep_paths.append(path)
 
-            mx.savez(self.output_dir / f"expert{i}.npz", **expert_weights)
+            if self.batching_strategy == 1:
+                mx.savez(self.output_dir / f"expert{i}.npz", **expert_weights)
+            elif self.batching_strategy == 2:
+                mx.savez(
+                    self.output_dir / f"expert{i}.npz",
+                    layer1=mx.stack(
+                        [
+                            expert_weights[f"blocks.{j}.experts.{i}.{k}.weight"]
+                            for j in range(num_layers)
+                            for k in ["v1", "w1"]
+                        ],
+                        axis=0,
+                    ),
+                    layer2=mx.stack(
+                        [
+                            expert_weights[f"blocks.{j}.experts.{i}.w2.weight"]
+                            for j in range(num_layers)
+                        ],
+                        axis=0,
+                    ),
+                )
+
             print(f"batched expert {i} weights")
 
             self.clean_if_told(sep_paths)
@@ -132,7 +153,7 @@ class WeightsPreprocessor:
             del sep_paths
             gc.collect()
 
-    def combine_non_experts(self, num_layers: int) -> None:
+    def batch_non_experts(self, num_layers: int) -> None:
         non_expert_weights = {}
         sep_paths = []
         for i in range(num_layers):
@@ -145,6 +166,34 @@ class WeightsPreprocessor:
         sep_paths.append(non_layer_path)
 
         mx.savez(self.output_dir / f"non-expert.npz", **non_expert_weights)
+        # if self.batching_strategy == 1:
+        #     mx.savez(self.output_dir / f"non-expert.npz", **non_expert_weights)
+        # elif self.batching_strategy == 2:
+        #     attention_and_router_order = [
+        #         "ffn.router.layer",
+        #         "norm_attn_norm.attn.Wqkv",
+        #         "norm_attn_norm.attn.out_proj",
+        #         "norm_attn_norm.norm_1",
+        #         "norm_attn_norm.norm_2",
+        #     ]
+        #     sorted_k = (
+        #         ["lm_head.weight"]
+        #         + [
+        #             f"blocks.{i}.{j}.weight"
+        #             for i in range(num_layers)
+        #             for j in attention_and_router_order
+        #         ]
+        #         + ["norm_f.weight", "wte.weight"]
+        #     )
+        #     mx.savez(
+        #         self.output_dir / f"non-expert.npz",
+        #         stacked_weights=mx.stack(
+        #             [non_expert_weights[k] for k in sorted_k], axis=0
+        #         ),
+        #     )
+        #     del attention_and_router_order
+        #     del sorted_k
+
         print(f"batched non-expert weights")
 
         self.clean_if_told(sep_paths)
@@ -152,6 +201,7 @@ class WeightsPreprocessor:
         # forces python to free up memory
         del non_expert_weights
         del sep_paths
+        del non_layer_path
         gc.collect()
 
     def start(self) -> None:
@@ -189,11 +239,11 @@ class WeightsPreprocessor:
             + f"{time.perf_counter() - tic} sec(s)"
         )
 
-        if self.batch:
+        if self.batching_strategy > 0:
             tic = time.perf_counter()
 
-            self.combine_experts(num_layers, num_experts)
-            self.combine_non_experts(num_layers)
+            self.batch_experts(num_layers, num_experts)
+            self.batch_non_experts(num_layers)
 
             print(f"weights batched in {time.perf_counter() - tic} sec(s)")
 
@@ -204,12 +254,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str)
     parser.add_argument("--output-dir", type=str)
-    parser.add_argument("--batch", action="store_true")
+    parser.add_argument(
+        "--batching-strategy",
+        type=int,
+        default=0,
+        help="0: no batching, 1: batch by expert, 2: batch by and within expert",
+    )
     parser.add_argument("--clean-sep", action="store_true")
     args = parser.parse_args()
     logging.basicConfig()
 
     weights_preprocessor = WeightsPreprocessor(
-        args.model_path, args.output_dir, args.batch, args.clean_sep
+        args.model_path, args.output_dir, args.batching_strategy, args.clean_sep
     )
     weights_preprocessor.start()
