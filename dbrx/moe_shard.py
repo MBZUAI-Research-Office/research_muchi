@@ -151,6 +151,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int)
     parser.add_argument("--model-path", type=str)
     args = parser.parse_args()
-    mx.metal.set_cache_limit(0)
+    # mx.metal.set_cache_limit(0)
     logging.basicConfig(level=logging.INFO)
     asyncio.run(serve(args.port, args.model_path))
