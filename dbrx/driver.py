@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator, Optional, Tuple
+from typing import Optional, Tuple
 import argparse
 import asyncio
 import json
@@ -29,6 +29,9 @@ DEFAULT_PROMPT = "hello"
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 DEFAULT_TOP_P = 1.0
+
+# DEV
+LOGS = []
 
 
 @dataclass
@@ -192,8 +195,7 @@ class DistributedSparseMoeBlock(nn.Module):
                 ]
 
             # DEV
-            print(shard_to_experts, flush=True)
-            print("-" * 20, flush=True)
+            LOGS.append((it, shard_to_experts))
 
             yt = mx.stack(
                 mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1
@@ -405,6 +407,28 @@ class Driver:
             )
 
             await self.generate(model, tokenizer, prompt, max_tokens, temp, top_p)
+
+            # DEV
+            with (
+                open("./shard_activation.csv", "a") as shard_activation_logs,
+                open("./expert_activation.csv", "a") as expert_activation_logs,
+            ):
+                for experts, shard_to_experts in LOGS:
+                    shard_activation_row = []
+                    for si in range(4):
+                        shard_activation_row.append(
+                            0
+                            if si not in shard_to_experts
+                            else len(shard_to_experts[si])
+                        )
+
+                    expert_activation_row = []
+                    es = set(experts)
+                    for e in range(16):
+                        expert_activation_row.append(1 if e in es else 0)
+
+                    shard_activation_logs.write(",".join(shard_activation_row) + "\n")
+                    expert_activation_logs.write(",".join(expert_activation_row) + "\n")
 
 
 if __name__ == "__main__":

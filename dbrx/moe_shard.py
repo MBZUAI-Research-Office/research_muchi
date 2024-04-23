@@ -84,9 +84,19 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
     async def Execute(
         self, request: moe_shard_pb2.Inputs, context: grpc.aio.ServicerContext
     ):
+        # DEV
+        activated_experts = np.frombuffer(request.activated_experts, dtype=np.int64)
+        print(f"start executing: {activated_experts}", flush=True)
+        print("-" * 10, flush=True)
+
+        # outputs = self.model(
+        #     request.block_num,
+        #     np.frombuffer(request.activated_experts, dtype=np.int64),
+        #     np.frombuffer(request.data, dtype=np.float32),
+        # )
         outputs = self.model(
             request.block_num,
-            np.frombuffer(request.activated_experts, dtype=np.int64),
+            activated_experts,
             np.frombuffer(request.data, dtype=np.float32),
         )
 
