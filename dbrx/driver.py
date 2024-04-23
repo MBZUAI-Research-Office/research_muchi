@@ -191,6 +191,10 @@ class DistributedSparseMoeBlock(nn.Module):
                     for si, activated_experts in shard_to_experts.items()
                 ]
 
+            # DEV
+            print(shard_to_experts, flush=True)
+            print("-" * 20, flush=True)
+
             yt = mx.stack(
                 mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1
             )
@@ -348,7 +352,10 @@ class Driver:
 
             s = tokenizer.decode(tokens)
             if s[-1] != REPLACEMENT_CHAR:
-                print(s[skip:], end="", flush=True)
+                # DEV
+                print(s[skip:], flush=True)
+                print("-" * 20, flush=True)
+
                 skip = len(s)
             # Reset token cache at line break
             if s[-1] == "\n":

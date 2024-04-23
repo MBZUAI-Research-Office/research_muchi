@@ -89,6 +89,11 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
             np.frombuffer(request.activated_experts, dtype=np.int64),
             np.frombuffer(request.data, dtype=np.float32),
         )
+
+        # DEV
+        print("done executing", flush=True)
+        print("-" * 10, flush=True)
+
         return moe_shard_pb2.Outputs(data=outputs.tobytes())
 
     def load_model(self) -> nn.Module:
