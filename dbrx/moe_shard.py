@@ -106,23 +106,12 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
         for i, e in enumerate(model_args.ffn_config["assigned_experts"]):
             model_args.ffn_config["expert_to_i"][e] = i
 
-            if model_args.ffn_config["weights_batching_strategy"] == 1:
-                for k, v in mx.load(str(self.model_path / f"expert{e}.npz")).items():
-                    k_splits = k.split(".")
-                    k_splits[3] = str(i)
-                    weights[".".join(k_splits)] = v
-            elif model_args.ffn_config["weights_batching_strategy"] == 2:
-                stacked_weights = mx.load(str(self.model_path / f"expert{e}.npz"))
-                for n in range(model_args.n_layers):
-                    weights[f"blocks.{n}.experts.{i}.v1.weight"] = stacked_weights[
-                        "layer1"
-                    ][n * 2]
-                    weights[f"blocks.{n}.experts.{i}.w1.weight"] = stacked_weights[
-                        "layer1"
-                    ][n * 2 + 1]
-                    weights[f"blocks.{n}.experts.{i}.w2.weight"] = stacked_weights[
-                        "layer2"
-                    ][n]
+            for k, v in mx.load(str(self.model_path / f"expert{e}.npz")).items():
+                # sample k: blocks.10.experts.12.v1.weight
+                # change expert number (0 - 15) to internal index
+                k_splits = k.split(".")
+                k_splits[3] = str(i)
+                weights[".".join(k_splits)] = v.T if k_splits[4] == "w2" else v
 
         del model_args.ffn_config["assigned_experts"]
 
@@ -151,6 +140,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int)
     parser.add_argument("--model-path", type=str)
     args = parser.parse_args()
+
     # mx.metal.set_cache_limit(0)
     logging.basicConfig(level=logging.INFO)
     asyncio.run(serve(args.port, args.model_path))

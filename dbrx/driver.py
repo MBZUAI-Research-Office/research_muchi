@@ -30,9 +30,6 @@ DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 DEFAULT_TOP_P = 1.0
 
-# DEBUG
-# mx.random.seed(0)
-TEST_OUT = {}
 
 @dataclass
 class ModelArgs(BaseModelArgs):
@@ -200,9 +197,6 @@ class DistributedSparseMoeBlock(nn.Module):
             yt = (yt * st).sum(axis=-1)
             y.append(yt)
         y = mx.stack(y, axis=0)
-
-        # DEBUG
-        TEST_OUT[str(block_num)] = y.reshape(orig_shape)
 
         return y.reshape(orig_shape)
 
@@ -432,6 +426,3 @@ if __name__ == "__main__":
     logging.basicConfig()
     driver = Driver(args.model_path)
     asyncio.run(driver.start(args.prompt, args.max_tokens, args.temp, args.top_p))
-
-    # DEBUG
-    mx.savez("test_out_batch1.npz", **TEST_OUT)
