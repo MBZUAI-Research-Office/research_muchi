@@ -388,7 +388,7 @@ class Driver:
             ]
 
             model = DistributedDBRX(model_args)
-            weights = mx.load(str(self.model_path / f"non-expert.npz"))
+            weights = mx.load(str(self.model_path / f"non-expert.safetensors"))
             model.load_weights(list(weights.items()))
             mx.eval(model.parameters())
             model.eval()

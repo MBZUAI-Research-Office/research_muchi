@@ -106,7 +106,7 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
         for i, e in enumerate(model_args.ffn_config["assigned_experts"]):
             model_args.ffn_config["expert_to_i"][e] = i
 
-            for k, v in mx.load(str(self.model_path / f"expert{e}.npz")).items():
+            for k, v in mx.load(str(self.model_path / f"expert{e}.safetensors")).items():
                 # sample k: blocks.10.experts.12.v1.weight
                 # change expert number (0 - 15) to internal index
                 k_splits = k.split(".")
