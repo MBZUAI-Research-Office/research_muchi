@@ -344,15 +344,16 @@ class Driver:
             if n >= max_tokens:
                 break
 
-            token = token.item()
+            token = token.item() # get word ID
             if n == 0:
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
             if token == tokenizer.eos_token_id:
+                n += 1
                 break
             tokens.append(token)
 
-            s = tokenizer.decode(tokens)
+            s = tokenizer.decode(tokens) # str
             if s[-1] != REPLACEMENT_CHAR:
                 # DEV
                 print(s[skip:], flush=True)
@@ -367,21 +368,22 @@ class Driver:
 
             n += 1
 
-        token_count = n + 1
         token_strings.append(tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, ""))
 
         print(token_strings[-1][skip:], flush=True)
         gen_time = time.perf_counter() - tic
         print("=" * 10)
-        if token_count == 0:
+        if n == 0:
             print("No tokens generated for this prompt")
             return
-        prompt_tps = prompt_tokens.size / prompt_time
-        gen_tps = (token_count - 1) / gen_time
-        print(f"Prompt: {prompt_tps:.3f} tokens-per-sec")
-        print(f"Generation: {gen_tps:.3f} tokens-per-sec")
-
-        return "".join(token_strings)
+        print(
+            f"Prompt: {prompt_tokens.size} tokens in {prompt_time} seconds "
+            + f"= {(prompt_tokens.size / prompt_time):.3f} t/s"
+        )
+        print(
+            f"Generation: {n - 1} tokens in {gen_time} seconds "
+            + f"= {((n - 1) / gen_time):.3f} t/s"
+        )
 
     async def start(
         self, prompt: str, max_tokens: int, temp: float, top_p: float
@@ -410,22 +412,22 @@ class Driver:
 
             # DEV
             with (
-                open("./shard_activation.csv", "a") as shard_activation_logs,
-                open("./expert_activation.csv", "a") as expert_activation_logs,
+                open(Path("./shard_activation.csv"), "a") as shard_activation_logs,
+                open(Path("./expert_activation.csv"), "a") as expert_activation_logs,
             ):
                 for experts, shard_to_experts in LOGS:
                     shard_activation_row = []
                     for si in range(4):
                         shard_activation_row.append(
-                            0
+                            "0"
                             if si not in shard_to_experts
-                            else len(shard_to_experts[si])
+                            else str(len(shard_to_experts[si]))
                         )
 
                     expert_activation_row = []
                     es = set(experts)
                     for e in range(16):
-                        expert_activation_row.append(1 if e in es else 0)
+                        expert_activation_row.append("1" if e in es else "0")
 
                     shard_activation_logs.write(",".join(shard_activation_row) + "\n")
                     expert_activation_logs.write(",".join(expert_activation_row) + "\n")
