@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import argparse
 import asyncio
-import gc
 import json
 import logging
 
@@ -18,6 +17,11 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from base import BaseModelArgs
+
+# coroutines to be invoked when the event loop is shutting down
+# copied from:
+# https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
+_cleanup_coroutines = []
 
 
 @dataclass
@@ -121,7 +125,9 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
         for i, e in enumerate(model_args.ffn_config["assigned_experts"]):
             model_args.ffn_config["expert_to_i"][e] = i
 
-            for k, v in mx.load(str(self.model_path / f"expert{e}.safetensors")).items():
+            for k, v in mx.load(
+                str(self.model_path / f"expert{e}.safetensors")
+            ).items():
                 # sample k: blocks.10.experts.12.v1.weight
                 # change expert number (0 - 15) to internal index
                 k_splits = k.split(".")
@@ -147,6 +153,17 @@ async def serve(port: int, model_path: str):
     server.add_insecure_port(listen_addr)
     logging.info(f"Starting server on {listen_addr}")
     await server.start()
+
+    # copied from:
+    # https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
+    async def server_graceful_shutdown():
+        logging.info("Starting graceful shutdown...")
+        # Shuts down the server with 3 seconds of grace period. During the
+        # grace period, the server won't accept new connections and allow
+        # existing RPCs to continue within the grace period.
+        await server.stop(3)
+
+    _cleanup_coroutines.append(server_graceful_shutdown())
     await server.wait_for_termination()
 
 
@@ -158,4 +175,9 @@ if __name__ == "__main__":
 
     # mx.metal.set_cache_limit(0)
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(serve(args.port, args.model_path))
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(serve(args.port, args.model_path))
+    finally:
+        loop.run_until_complete(*_cleanup_coroutines)
+        loop.close()
