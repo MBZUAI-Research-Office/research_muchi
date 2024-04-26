@@ -81,9 +81,9 @@ class DistributedDBRX(nn.Module):
 
 class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
 
-    def __init__(self, model_path: str) -> None:
+    def __init__(self, model_path: str, config_filename: str) -> None:
         self.model_path = Path(model_path)
-        self.model = self.load_model()
+        self.model = self.load_model(config_filename)
 
     async def Execute(
         self, request: moe_shard_pb2.Inputs, context: grpc.aio.ServicerContext
@@ -110,12 +110,12 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
 
         return moe_shard_pb2.Outputs(data=outputs.tobytes())
 
-    def load_model(self) -> nn.Module:
+    def load_model(self, config_filename: str) -> nn.Module:
         try:
-            with open(self.model_path / "moe_shard_config.json", "r") as f:
+            with open(self.model_path / config_filename, "r") as f:
                 config = json.load(f)
         except FileNotFoundError:
-            logging.error(f"moe_shard_config.json not found in {self.model_path}")
+            logging.error(f"{config_filename} not found in {self.model_path}")
             raise
 
         model_args = ModelArgs.from_dict(config)
@@ -144,10 +144,10 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
         return model
 
 
-async def serve(port: int, model_path: str):
+async def serve(port: int, model_path: str, config_filename: str):
     server = grpc.aio.server()
     moe_shard_pb2_grpc.add_MoeShardServicer_to_server(
-        MoeShardServicer(model_path), server
+        MoeShardServicer(model_path, config_filename), server
     )
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
@@ -171,13 +171,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int)
     parser.add_argument("--model-path", type=str)
+    parser.add_argument("--config-filename", type=str)
     args = parser.parse_args()
 
     # mx.metal.set_cache_limit(0)
     logging.basicConfig(level=logging.INFO)
     loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(serve(args.port, args.model_path))
+        loop.run_until_complete(serve(args.port, args.model_path, args.config_filename))
     finally:
         loop.run_until_complete(*_cleanup_coroutines)
         loop.close()
