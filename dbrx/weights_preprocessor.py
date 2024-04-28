@@ -125,16 +125,32 @@ class WeightsPreprocessor:
                 path.unlink()
 
     def batch_expert(self, expert_num: int, num_layers: int) -> None:
-        expert_weights = {}
         sep_paths = []
-        for i in range(num_layers):
-            path = self.input_path / f"block{i}-expert{expert_num}.safetensors"
-            expert_weights.update(safetensors.torch.load_file(path))
-            sep_paths.append(path)
 
-        safetensors.torch.save_file(
-            expert_weights, self.output_path / f"expert{expert_num}.safetensors"
-        )
+        if self.batching_strategy == 1:
+            expert_weights = {}
+            for i in range(num_layers):
+                path = self.input_path / f"block{i}-expert{expert_num}.safetensors"
+                expert_weights.update(safetensors.torch.load_file(path))
+                sep_paths.append(path)
+
+            safetensors.torch.save_file(
+                expert_weights, self.output_path / f"expert{expert_num}.safetensors"
+            )
+        elif self.batching_strategy == 2:
+            expert_weights = []
+            for i in range(num_layers):
+                path = self.input_path / f"block{i}-expert{expert_num}.safetensors"
+                weights = safetensors.torch.load_file(path)
+                for j in ["v1", "w1", "w2"]:
+                    k = f"blocks.{i}.experts.{expert_num}.{j}.weight"
+                    expert_weights.append(weights[k])
+                sep_paths.append(path)
+
+            safetensors.torch.save_file(
+                {"weights": torch.stack(expert_weights, dim=0)},
+                self.output_path / f"expert{expert_num}.safetensors",
+            )
 
         print(f"batched expert {expert_num} weights")
         self.clean_if_told(sep_paths)
