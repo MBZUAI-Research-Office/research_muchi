@@ -2,10 +2,10 @@ syntax = "proto3";
 
 service MoeShard {
   rpc Execute (Inputs) returns (Outputs) {}
+  rpc ToNextBlock (Empty) returns (Empty) {}
 }
 
 message Inputs {
-  int32 block_num = 1;
   bytes activated_experts = 2;
   bytes data = 3;
 }
@@ -13,3 +13,5 @@ message Inputs {
 message Outputs {
   bytes data = 1;
 }
+
+message Empty {}
