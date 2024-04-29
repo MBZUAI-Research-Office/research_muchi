@@ -26,10 +26,12 @@ _cleanup_coroutines = []
 class DistributedDBRX:
 
     def __init__(self, experts: dict) -> None:
-        self.experts = {k: self.expert_generator(v) for k, v in experts.items()}
+        self.experts = experts
+        self.expert_generators = None
         self.act_fn = nn.silu
+        self.reset_generators()
 
-    def expert_generator(self, expert: mx.array):
+    def get_expert_generator(self, expert: mx.array):
         v1, w1 = None, None
         for i, weight in enumerate(expert):
             if i % 3 == 0:
@@ -39,21 +41,33 @@ class DistributedDBRX:
             else:
                 yield v1, w1, weight
 
+    def reset_generators(self):
+        self.expert_generators = {
+            k: self.get_expert_generator(v) for k, v in self.experts.items()
+        }
+
+    def next_safe(self, expert_generator):
+        try:
+            return next(expert_generator)
+        except StopIteration:
+            self.reset_generators()
+            return next(expert_generator)
+
     def to_next_block(self) -> None:
         # in case that this shard is not activated for this block/layer
-        for weights_generator in self.experts.values():
-            next(weights_generator)
+        for g in self.expert_generators.values():
+            self.next_safe(g)
 
     def __call__(self, activated_experts: set, inputs: np.array) -> np.array:
         x = mx.array(inputs, dtype=mx.bfloat16)
         ys = []
-        for e, weights_generator in self.experts.items():
+        for e, g in self.expert_generators.items():
             if e in activated_experts:
-                v1, w1, w2 = next(weights_generator)
+                v1, w1, w2 = self.next_safe(g)
                 ys.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
             else:
                 # ensures that expert_generators are in sync
-                next(weights_generator)
+                self.next_safe(g)
 
         # conversion is needed since NumPy does not support bfloat16 arrays
         # see: https://ml-explore.github.io/mlx/build/html/usage/numpy.html
