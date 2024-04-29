@@ -1,9 +1,9 @@
 # Examples:
 #  launch all shards:
-#    python launch_moe_shards.py --model-path ~/dbrx-base/distributable/batch1/
+#    python launch_moe_shards.py --model-path ~/dbrx-base/distributable/batch2/
 #
 #  terminate all shards:
-#    python launch_moe_shards.py --model-path ~/dbrx-base/distributable/batch1/ --terminate
+#    python launch_moe_shards.py --model-path ~/dbrx-base/distributable/batch2/ --terminate
 import subprocess
 import time
 from types import SimpleNamespace
