@@ -103,6 +103,7 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))["weights"]
             for e in config["ffn_config"]["assigned_experts"]
         }
+        mx.eval(experts)
 
         return DistributedDBRX(experts)
 

@@ -193,7 +193,7 @@ class DistributedSparseMoeBlock(nn.Module):
                         )
                         exec_tasks.append(et)
                     else:
-                        tg.create_task(self.skip_shard())
+                        tg.create_task(self.skip_shard(shard))
 
             yt = mx.concatenate([et.result() for et in exec_tasks], axis=0)
             yt = mx.stack(yt, axis=-1)
