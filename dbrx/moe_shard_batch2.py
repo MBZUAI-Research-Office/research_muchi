@@ -26,7 +26,7 @@ _cleanup_coroutines = []
 class DistributedDBRX:
 
     def __init__(self, experts: dict) -> None:
-        self.experts = {k: self.expert_generator(v) for k, v in experts}
+        self.experts = {k: self.expert_generator(v) for k, v in experts.items()}
         self.act_fn = nn.silu
 
     def expert_generator(self, expert: mx.array):
