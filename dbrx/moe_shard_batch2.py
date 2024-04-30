@@ -107,7 +107,7 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
 
 
 def serve(port: int, model_path: str, config_filename: str):
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     moe_shard_pb2_grpc.add_MoeShardServicer_to_server(
         MoeShardServicer(model_path, config_filename), server
     )
