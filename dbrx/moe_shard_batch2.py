@@ -125,6 +125,5 @@ if __name__ == "__main__":
     parser.add_argument("--config-filename", type=str)
     args = parser.parse_args()
 
-    # mx.metal.set_cache_limit(0)
     logging.basicConfig(level=logging.INFO)
-    serve()
+    serve(args.port, args.model_path, args.config_filename)
