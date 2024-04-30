@@ -74,7 +74,7 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
         self.model_path = Path(model_path)
         self.model = self.load_model(config_filename)
 
-    async def Execute(
+    def Execute(
         self, request: moe_shard_pb2.Inputs, context: grpc.aio.ServicerContext
     ):
         outputs = self.model(
@@ -83,7 +83,7 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
         )
         return moe_shard_pb2.Outputs(data=outputs.tobytes())
 
-    async def ToNextBlock(
+    def ToNextBlock(
         self, request: moe_shard_pb2.Inputs, context: grpc.aio.ServicerContext
     ):
         self.model.to_next_block()
