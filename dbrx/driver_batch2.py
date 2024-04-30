@@ -146,24 +146,14 @@ class DistributedSparseMoeBlock(nn.Module):
     async def execute_on_shard(
         self,
         shard: moe_shard_pb2_grpc.MoeShardStub,
-        activated_experts: set,
         x: mx.array,  # 1-dimensional
     ):
-        outputs = await shard.Execute(
-            moe_shard_pb2.Inputs(
-                activated_experts=pickle.dumps(activated_experts),
-                data=np.array(x.astype(mx.float32)).tobytes(),
-            )
-        )
+        x_bytes = np.array(x.astype(mx.float32)).tobytes()
+        outputs = await shard.Execute(moe_shard_pb2.Inputs(data=x_bytes))
         # reshape because np.frombuffer() interprets a buffer as a 1-dimensional array
-        outputs = np.frombuffer(outputs.data, dtype=np.float32).reshape(
-            (len(activated_experts), self.d_model)
-        )
+        outputs = np.frombuffer(outputs.data, dtype=np.float32)
+        outputs = outputs.reshape((len(activated_experts), self.d_model))
         return mx.array(outputs, dtype=mx.bfloat16)
-
-    async def skip_shard(self, shard: moe_shard_pb2_grpc.MoeShardStub):
-        # ensures that shards are in sync in terms of block/layer num
-        await shard.ToNextBlock(moe_shard_pb2.Empty())
 
     async def __call__(self, x: mx.array) -> mx.array:
         ne = self.num_experts_per_tok
@@ -180,20 +170,13 @@ class DistributedSparseMoeBlock(nn.Module):
 
         y = []
         for xt, st, it in zip(x, scores, inds.tolist()):
-            shard_to_experts = {}
-            for e in it:
-                shard_to_experts.setdefault(self.expert_to_shard[e], set()).add(e)
-
             async with asyncio.TaskGroup() as tg:
                 exec_tasks = []
                 for si, shard in enumerate(self.shards):
-                    if si in shard_to_experts:
-                        et = tg.create_task(
-                            self.execute_on_shard(shard, shard_to_experts[si], xt)
-                        )
-                        exec_tasks.append(et)
-                    else:
-                        tg.create_task(self.skip_shard(shard))
+                    et = tg.create_task(
+                        self.execute_on_shard(shard, shard_to_experts[si], xt)
+                    )
+                    exec_tasks.append(et)
 
             yt = mx.concatenate([et.result() for et in exec_tasks], axis=0)
             yt = mx.stack(yt, axis=-1)

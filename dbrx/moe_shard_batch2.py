@@ -47,21 +47,12 @@ class DistributedDBRX:
             self.reset_generators()
             return next(self.expert_generators[e])
 
-    def to_next_block(self) -> None:
-        # in case that this shard is not activated for this block/layer
-        for e in self.experts:
-            self.next_safe(e)
-
-    def __call__(self, activated_experts: set, inputs: np.array) -> np.array:
+    def __call__(self, inputs: np.array) -> np.array:
         x = mx.array(inputs, dtype=mx.bfloat16)
         ys = []
         for e in self.experts:
-            if e in activated_experts:
-                v1, w1, w2 = self.next_safe(e)
-                ys.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
-            else:
-                # ensures that expert_generators are in sync
-                self.next_safe(e)
+            v1, w1, w2 = self.next_safe(e)
+            ys.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
 
         # conversion is needed since NumPy does not support bfloat16 arrays
         # see: https://ml-explore.github.io/mlx/build/html/usage/numpy.html
@@ -75,15 +66,8 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
         self.model = self.load_model(config_filename)
 
     def Execute(self, request: moe_shard_pb2.Inputs, context):
-        outputs = self.model(
-            pickle.loads(request.activated_experts),
-            np.frombuffer(request.data, dtype=np.float32),
-        )
+        outputs = self.model(np.frombuffer(request.data, dtype=np.float32))
         return moe_shard_pb2.Outputs(data=outputs.tobytes())
-
-    def ToNextBlock(self, request, context):
-        self.model.to_next_block()
-        return moe_shard_pb2.Empty()
 
     def load_model(self, config_filename: str):
         try:

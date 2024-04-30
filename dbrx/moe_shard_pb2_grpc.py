@@ -19,23 +19,12 @@ class MoeShardStub(object):
                 request_serializer=moe__shard__pb2.Inputs.SerializeToString,
                 response_deserializer=moe__shard__pb2.Outputs.FromString,
                 )
-        self.ToNextBlock = channel.unary_unary(
-                '/MoeShard/ToNextBlock',
-                request_serializer=moe__shard__pb2.Empty.SerializeToString,
-                response_deserializer=moe__shard__pb2.Empty.FromString,
-                )
 
 
 class MoeShardServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Execute(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def ToNextBlock(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -48,11 +37,6 @@ def add_MoeShardServicer_to_server(servicer, server):
                     servicer.Execute,
                     request_deserializer=moe__shard__pb2.Inputs.FromString,
                     response_serializer=moe__shard__pb2.Outputs.SerializeToString,
-            ),
-            'ToNextBlock': grpc.unary_unary_rpc_method_handler(
-                    servicer.ToNextBlock,
-                    request_deserializer=moe__shard__pb2.Empty.FromString,
-                    response_serializer=moe__shard__pb2.Empty.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -78,22 +62,5 @@ class MoeShard(object):
         return grpc.experimental.unary_unary(request, target, '/MoeShard/Execute',
             moe__shard__pb2.Inputs.SerializeToString,
             moe__shard__pb2.Outputs.FromString,
-            options, channel_credentials,
-            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
-
-    @staticmethod
-    def ToNextBlock(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/MoeShard/ToNextBlock',
-            moe__shard__pb2.Empty.SerializeToString,
-            moe__shard__pb2.Empty.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
