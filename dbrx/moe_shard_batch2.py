@@ -74,18 +74,14 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
         self.model_path = Path(model_path)
         self.model = self.load_model(config_filename)
 
-    def Execute(
-        self, request: moe_shard_pb2.Inputs, context: grpc.aio.ServicerContext
-    ):
+    def Execute(self, request: moe_shard_pb2.Inputs, context):
         outputs = self.model(
             pickle.loads(request.activated_experts),
             np.frombuffer(request.data, dtype=np.float32),
         )
         return moe_shard_pb2.Outputs(data=outputs.tobytes())
 
-    def ToNextBlock(
-        self, request: moe_shard_pb2.Inputs, context: grpc.aio.ServicerContext
-    ):
+    def ToNextBlock(self, request, context):
         self.model.to_next_block()
         return moe_shard_pb2.Empty()
 
