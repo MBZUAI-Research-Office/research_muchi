@@ -7,8 +7,8 @@ import json
 import logging
 
 import grpc
-import moe_shard_pb2
-import moe_shard_pb2_grpc
+import moe_shard_batch2_pb2
+import moe_shard_batch2_pb2_grpc
 
 import numpy as np
 
@@ -55,15 +55,15 @@ class DistributedDBRX:
         return np.array(mx.array(ys).astype(mx.float32))
 
 
-class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
+class MoeShardServicer(moe_shard_batch2_pb2_grpc.MoeShardServicer):
 
     def __init__(self, model_path: str, config_filename: str) -> None:
         self.model_path = Path(model_path)
         self.model = self.load_model(config_filename)
 
-    def Execute(self, request: moe_shard_pb2.Inputs, context):
+    def Execute(self, request: moe_shard_batch2_pb2.Inputs, context):
         outputs = self.model(np.frombuffer(request.data, dtype=np.float32))
-        return moe_shard_pb2.Outputs(data=outputs.tobytes())
+        return moe_shard_batch2_pb2.Outputs(data=outputs.tobytes())
 
     def load_model(self, config_filename: str):
         try:
@@ -84,7 +84,7 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
 
 def serve(port: int, model_path: str, config_filename: str):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    moe_shard_pb2_grpc.add_MoeShardServicer_to_server(
+    moe_shard_batch2_pb2_grpc.add_MoeShardServicer_to_server(
         MoeShardServicer(model_path, config_filename), server
     )
     listen_addr = f"[::]:{port}"

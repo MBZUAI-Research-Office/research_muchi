@@ -9,12 +9,11 @@ import argparse
 import asyncio
 import json
 import logging
-import pickle
 import time
 
 import grpc
-import moe_shard_pb2
-import moe_shard_pb2_grpc
+import moe_shard_batch2_pb2
+import moe_shard_batch2_pb2_grpc
 
 import numpy as np
 
@@ -141,12 +140,12 @@ class DistributedSparseMoeBlock(nn.Module):
 
     async def execute_on_shard(
         self,
-        shard: moe_shard_pb2_grpc.MoeShardStub,
+        shard: moe_shard_batch2_pb2_grpc.MoeShardStub,
         assigned_experts: list,
         x: mx.array,  # 1-dimensional
     ):
         x_bytes = np.array(x.astype(mx.float32)).tobytes()
-        outputs = await shard.Execute(moe_shard_pb2.Inputs(data=x_bytes))
+        outputs = await shard.Execute(moe_shard_batch2_pb2.Inputs(data=x_bytes))
         # reshape because np.frombuffer() interprets a buffer as a 1-dimensional array
         outputs = np.frombuffer(outputs.data, dtype=np.float32)
         return outputs.reshape((len(assigned_experts), self.d_model))
@@ -368,7 +367,7 @@ class Driver:
             model_args = self.get_model_args()
             for url in list(model_args.ffn_config["moe_shard_map"].keys()):
                 channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
-                shard = moe_shard_pb2_grpc.MoeShardStub(channel)
+                shard = moe_shard_batch2_pb2_grpc.MoeShardStub(channel)
                 model_args.ffn_config["moe_shard_map"][url]["shard"] = shard
 
             model = DistributedDBRX(model_args)

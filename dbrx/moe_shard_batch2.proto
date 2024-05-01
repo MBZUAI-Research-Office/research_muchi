@@ -5,9 +5,7 @@ service MoeShard {
 }
 
 message Inputs {
-  int32 block_num = 1;
-  bytes activated_experts = 2;
-  bytes data = 3;
+  bytes data = 1;
 }
 
 message Outputs {
