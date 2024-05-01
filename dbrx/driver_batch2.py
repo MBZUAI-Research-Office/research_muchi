@@ -30,6 +30,9 @@ DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 DEFAULT_TOP_P = 1.0
 
+# DEBUG
+# YS = []
+
 
 @dataclass
 class ModelArgs(BaseModelArgs):
@@ -135,20 +138,25 @@ class DistributedSparseMoeBlock(nn.Module):
         super().__init__()
         self.d_model = args.d_model
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
+        self.expert_to_url = args.ffn_config["expert_to_url"]
         self.moe_shard_map = args.ffn_config["moe_shard_map"]
         self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
     async def execute_on_shard(
         self,
         shard: moe_shard_batch2_pb2_grpc.MoeShardStub,
-        assigned_experts: list,
-        x: mx.array,  # 1-dimensional
+        n_assigned_experts: int,
+        batch_size: int,
+        x: mx.array,  # x.shape == (batch_size, self.d_model)
     ):
         x_bytes = np.array(x.astype(mx.float32)).tobytes()
-        outputs = await shard.Execute(moe_shard_batch2_pb2.Inputs(data=x_bytes))
+        outputs = await shard.Execute(
+            moe_shard_batch2_pb2.Inputs(batch_size=batch_size, data=x_bytes)
+        )
         # reshape because np.frombuffer() interprets a buffer as a 1-dimensional array
         outputs = np.frombuffer(outputs.data, dtype=np.float32)
-        return outputs.reshape((len(assigned_experts), self.d_model))
+        outputs = outputs.reshape((batch_size, n_assigned_experts, self.d_model))
+        return mx.array(outputs, dtype=mx.bfloat16)
 
     async def __call__(self, x: mx.array) -> mx.array:
         ne = self.num_experts_per_tok
@@ -164,27 +172,28 @@ class DistributedSparseMoeBlock(nn.Module):
         scores = scores.astype(x.dtype)
 
         y = []
-        for xt, st, it in zip(x, scores, inds.tolist()):
-            async with asyncio.TaskGroup() as tg:
-                exec_tasks = {}
-                for url, d in self.moe_shard_map.items():
-                    exec_tasks[url] = tg.create_task(
-                        self.execute_on_shard(d["shard"], d["assigned_experts"], xt)
-                    )
+        batch_size = x.shape[0]
 
+        async with asyncio.TaskGroup() as tg:
+            exec_tasks = {}
+            for url, d in self.moe_shard_map.items():
+                exec_tasks[url] = tg.create_task(
+                    self.execute_on_shard(d["shard"], len(d["expert_to_i"]), x)
+                )
+
+        for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
             yt = []
-            activated = set(it)
-            for url, task in exec_tasks.items():
-                res = task.result() # np array cuz mlx indexing sucks
-                for i, e in enumerate(self.moe_shard_map[url]["assigned_experts"]):
-                    if e in activated:
-                        yt.append(mx.array(res[i], dtype=mx.bfloat16))
+            for e in it:
+                url = self.expert_to_url[e]
+                ei = self.moe_shard_map[url]["expert_to_i"][e]
+                res = exec_tasks[url].result()[bi, ei]
+                yt.append(res)
 
             yt = mx.stack(yt, axis=-1)
             yt = (yt * st).sum(axis=-1)
             y.append(yt)
-        y = mx.stack(y, axis=0)
 
+        y = mx.stack(y, axis=0)
         return y.reshape(orig_shape)
 
 
@@ -249,12 +258,15 @@ class Driver:
             raise
 
         model_args = ModelArgs.from_dict(config)
+        model_args.ffn_config["expert_to_url"] = {}
 
         for url in list(model_args.ffn_config["moe_shard_map"].keys()):
             assigned_experts = model_args.ffn_config["moe_shard_map"][url]
-            model_args.ffn_config["moe_shard_map"][url] = {
-                "assigned_experts": assigned_experts
-            }
+            expert_to_i = {}
+            for i, e in enumerate(assigned_experts):
+                model_args.ffn_config["expert_to_url"][e] = url
+                expert_to_i[e] = i
+            model_args.ffn_config["moe_shard_map"][url] = {"expert_to_i": expert_to_i}
 
         return model_args
 
@@ -331,8 +343,8 @@ class Driver:
             s = tokenizer.decode(tokens)  # str
             if s[-1] != REPLACEMENT_CHAR:
                 # DEV
-                print(s[skip:], flush=True)
-                print("-" * 20, flush=True)
+                print(s[skip:], end="", flush=True)
+                # print("-" * 20, flush=True)
 
                 skip = len(s)
             # Reset token cache at line break
@@ -382,6 +394,12 @@ class Driver:
 
             await self.generate(model, tokenizer, prompt, max_tokens, temp, top_p)
 
+            # DEBUG
+            # mx.savez(
+            #     "moe_shard_batch2_ys",
+            #     **{f"arr_{i}": arr for i, arr in enumerate(YS)},
+            # )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -405,6 +423,9 @@ if __name__ == "__main__":
         "--top-p", type=float, default=DEFAULT_TOP_P, help="Sampling top-p"
     )
     args = parser.parse_args()
+
+    # DEBUG
+    mx.random.seed(0)
 
     logging.basicConfig()
     driver = Driver(args.model_path)

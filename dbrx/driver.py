@@ -30,8 +30,10 @@ DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 DEFAULT_TOP_P = 1.0
 
-# DEV
-# LOGS = []
+# DEBUG
+# XS = []
+# YS = []
+# ACTIVATED = []
 
 
 @dataclass
@@ -180,6 +182,7 @@ class DistributedSparseMoeBlock(nn.Module):
 
         y = []
         for xt, st, it in zip(x, scores, inds.tolist()):
+            # TODO: might need fixing
             shard_to_experts = {}
             for e in it:
                 shard_to_experts.setdefault(self.expert_to_shard[e], []).append(e)
@@ -194,8 +197,10 @@ class DistributedSparseMoeBlock(nn.Module):
                     for si, activated_experts in shard_to_experts.items()
                 ]
 
-            # DEV
-            # LOGS.append((it, shard_to_experts))
+            # DEBUG
+            # XS.append(xt)
+            # YS.append(mx.concatenate([task.result() for task in shard_tasks], axis=0))
+            # ACTIVATED.append(it)
 
             yt = mx.stack(
                 mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1
@@ -356,8 +361,8 @@ class Driver:
             s = tokenizer.decode(tokens) # str
             if s[-1] != REPLACEMENT_CHAR:
                 # DEV
-                print(s[skip:], flush=True)
-                print("-" * 20, flush=True)
+                print(s[skip:], end="", flush=True)
+                # print("-" * 20, flush=True)
 
                 skip = len(s)
             # Reset token cache at line break
@@ -410,7 +415,7 @@ class Driver:
 
             await self.generate(model, tokenizer, prompt, max_tokens, temp, top_p)
 
-            # DEV
+            # DEBUG
             # with (
             #     open(Path("./shard_activation.csv"), "a") as shard_activation_logs,
             #     open(Path("./expert_activation.csv"), "a") as expert_activation_logs,
@@ -431,6 +436,9 @@ class Driver:
 
             #         shard_activation_logs.write(",".join(shard_activation_row) + "\n")
             #         expert_activation_logs.write(",".join(expert_activation_row) + "\n")
+            # mx.savez("moe_shard_xs", **{f"arr_{i}": arr for i, arr in enumerate(XS)})
+            # mx.savez("moe_shard_ys", **{f"arr_{i}": arr for i, arr in enumerate(YS)})
+            # mx.savez("moe_shard_activated", **{f"arr_{i}": mx.array(arr) for i, arr in enumerate(ACTIVATED)})
 
 
 if __name__ == "__main__":
@@ -455,6 +463,9 @@ if __name__ == "__main__":
         "--top-p", type=float, default=DEFAULT_TOP_P, help="Sampling top-p"
     )
     args = parser.parse_args()
+
+    # DEBUG
+    mx.random.seed(0)
 
     logging.basicConfig()
     driver = Driver(args.model_path)

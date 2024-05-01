@@ -18,7 +18,7 @@ import mlx.nn as nn
 
 class DistributedDBRX:
 
-    def __init__(self, experts: dict) -> None:
+    def __init__(self, experts: list) -> None:
         self.experts = experts
         self.expert_generators = self.get_expert_generators()
         self.act_fn = nn.silu
@@ -44,38 +44,45 @@ class DistributedDBRX:
             return next(self.expert_generators[e])
 
     def __call__(self, inputs: np.array) -> np.array:
-        x = mx.array(inputs, dtype=mx.bfloat16)
+        xs = mx.array(inputs, dtype=mx.bfloat16)
         ys = []
-        for e in range(len(self.expert_generators)):
-            v1, w1, w2 = self.next_safe(e)
-            ys.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
 
-        # conversion is needed since NumPy does not support bfloat16 arrays
-        # see: https://ml-explore.github.io/mlx/build/html/usage/numpy.html
-        return np.array(mx.array(ys).astype(mx.float32))
+        # x.shape should be (6144,)
+        for x in xs:
+            expert_outs = []
+            for e in range(len(self.expert_generators)):
+                v1, w1, w2 = self.next_safe(e)
+                expert_outs.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
+            ys.append(mx.stack(expert_outs, axis=0).astype(mx.float32))
+
+        return np.array(ys)
 
 
 class MoeShardServicer(moe_shard_batch2_pb2_grpc.MoeShardServicer):
 
     def __init__(self, model_path: str, config_filename: str) -> None:
         self.model_path = Path(model_path)
-        self.model = self.load_model(config_filename)
+        self.model_args = self.get_model_args(config_filename)
+        self.model = self.load_model()
 
     def Execute(self, request: moe_shard_batch2_pb2.Inputs, context):
-        outputs = self.model(np.frombuffer(request.data, dtype=np.float32))
+        inputs = np.frombuffer(request.data, dtype=np.float32)
+        inputs = inputs.reshape((request.batch_size, self.model_args["d_model"]))
+        outputs = self.model(inputs)
         return moe_shard_batch2_pb2.Outputs(data=outputs.tobytes())
 
-    def load_model(self, config_filename: str):
+    def get_model_args(self, config_filename: str) -> dict:
         try:
             with open(self.model_path / config_filename, "r") as f:
-                config = json.load(f)
+                return json.load(f)
         except FileNotFoundError:
             logging.error(f"{config_filename} not found in {self.model_path}")
             raise
 
+    def load_model(self):
         experts = [
             mx.load(str(self.model_path / f"expert{e}.safetensors"))["weights"]
-            for e in config["ffn_config"]["assigned_experts"]
+            for e in self.model_args["ffn_config"]["assigned_experts"]
         ]
         mx.eval(experts)
 

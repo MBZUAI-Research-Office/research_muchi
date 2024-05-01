@@ -1,15 +1,8 @@
-# Examples:
-#  launch all shards:
-#    python launch_moe_shards.py --model-path ~/dbrx-base/distributable/batch1/
-#
-#  terminate all shards:
-#    python launch_moe_shards.py --model-path ~/dbrx-base/distributable/batch1/ --terminate
 import subprocess
+import argparse
 import time
 from types import SimpleNamespace
-import argparse
-from pathlib import Path
-import json
+import sys
 
 """terminal color"""
 TC = SimpleNamespace(
@@ -25,7 +18,7 @@ TC = SimpleNamespace(
 
 class Cmd:
     def __new__(
-        self, cmd: str, cwd="./", timeout_duration=None, suppress=True
+        self, cmd: str, cwd="./", timeout_duration=None, suppress=False
     ) -> tuple[int, str, str]:
         self.cmd = cmd
         self.cwd = cwd
@@ -97,49 +90,45 @@ class Cmd:
         return self.returncode, str(out, encoding="utf8"), str(err, encoding="utf8")
 
 
+def list_of_strings(arg):
+    return arg.split(",")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model-path", required=True, type=str, help="Path to local model directory"
-    )
+    # parser.add_argument("--ports", required=True, type=str)
+    parser.add_argument("--ports", type=list_of_strings)
     parser.add_argument("--terminate", action="store_true")
+
     args = parser.parse_args()
-    try:
-        with open(Path(args.model_path) / "driver_config.json", "r") as f:
-            config = json.load(f)
-    except FileNotFoundError:
-        raise
+    ports = args.ports
 
-    moe_shard_map = config["ffn_config"]["moe_shard_map"]
-    pure_urls = [url.split(":")[0] for url in moe_shard_map.keys()]
-    url_port_map = {url: [] for url in pure_urls}
-    for url, experts in moe_shard_map.items():
-        pure_url, port = url.split(":")
-        url_port_map[pure_url].append(port)
+    print("Sorry, we need to kill the tmux server")
+    Cmd("""tmux kill-server""")
+    if args.terminate:
+        return
 
-    for url, ports in url_port_map.items():
-        print(f"Shard: {url} {ports} ", end="")
+    rc, out, err = Cmd(
+        """tmux -f /dev/null new-session -s dbrx_poc -n experts -d zsh \;"""
+    )
+    if rc != 0:
+        print(err, file=sys.stderr)
+        sys.exit(1)
+    Cmd("""tmux set-option -g mouse on""")
+    Cmd("""tmux split-window -hf zsh \;""")
+    Cmd("""tmux split-window -hf zsh \;""")
+    Cmd("""tmux split-window -hf zsh \;""")
+    Cmd("""tmux select-layout even-horizontal \;""")
+    for e, port in enumerate(ports):
+        Cmd(f"""tmux send-keys -t {e} 'clear' Enter \;""")
+        Cmd(f"""tmux send-keys -t {e} 'conda activate dbrx_poc' Enter \;""")
+        Cmd(f"""tmux send-keys -t {e} 'cd ~/research_muchi/dbrx/' Enter \;""")
         Cmd(
-            f"""scp -i ~/.ssh/id_llamacpp ./run_shard.py xiangruike@{url}:/users/xiangruike"""
+            f"""tmux send-keys -t {e} 'python moe_shard_batch2.py --port {port}"""
+            + f""" --model-path ~/dbrx-base/distributable/batch2"""
+            + f""" --config-filename moe_shard_config_{e}.json' Enter \;""",
         )
-        if args.terminate:
-            rc, out, err = Cmd(
-                f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard.py --ports "{','.join(ports)}" --terminate'"""
-            )
-            if rc != 0:
-                print(err.strip())
-            else:
-                print("[terminated successfully]")
-        else:
-            rc, out, err = Cmd(
-                f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard.py --ports "{','.join(ports)}"'"""
-            )
-            if rc != 0:
-                print(err.strip())
-            else:
-                print("[launched successfully]")
+    # Cmd("""tmux -f /dev/null attach -t dbrx_poc""")
 
 
 if __name__ == "__main__":
