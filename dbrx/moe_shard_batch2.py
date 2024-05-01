@@ -5,7 +5,6 @@ from pathlib import Path
 import argparse
 import json
 import logging
-import pickle
 
 import grpc
 import moe_shard_pb2
@@ -21,9 +20,8 @@ class DistributedDBRX:
 
     def __init__(self, experts: dict) -> None:
         self.experts = experts
-        self.expert_generators = None
+        self.expert_generators = self.get_expert_generators()
         self.act_fn = nn.silu
-        self.reset_generators()
 
     def get_expert_generator(self, expert: mx.array):
         v1, w1 = None, None
@@ -35,22 +33,20 @@ class DistributedDBRX:
             else:
                 yield v1, w1, weight
 
-    def reset_generators(self):
-        self.expert_generators = {
-            k: self.get_expert_generator(v) for k, v in self.experts.items()
-        }
+    def get_expert_generators(self):
+        return [self.get_expert_generator(e) for e in self.experts]
 
     def next_safe(self, e):
         try:
             return next(self.expert_generators[e])
         except StopIteration:
-            self.reset_generators()
+            self.expert_generators = self.get_expert_generators()
             return next(self.expert_generators[e])
 
     def __call__(self, inputs: np.array) -> np.array:
         x = mx.array(inputs, dtype=mx.bfloat16)
         ys = []
-        for e in self.experts:
+        for e in range(len(self.expert_generators)):
             v1, w1, w2 = self.next_safe(e)
             ys.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
 
@@ -77,10 +73,10 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
             logging.error(f"{config_filename} not found in {self.model_path}")
             raise
 
-        experts = {
-            e: mx.load(str(self.model_path / f"expert{e}.safetensors"))["weights"]
+        experts = [
+            mx.load(str(self.model_path / f"expert{e}.safetensors"))["weights"]
             for e in config["ffn_config"]["assigned_experts"]
-        }
+        ]
         mx.eval(experts)
 
         return DistributedDBRX(experts)

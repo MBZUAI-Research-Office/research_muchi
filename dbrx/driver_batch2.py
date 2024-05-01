@@ -136,24 +136,20 @@ class DistributedSparseMoeBlock(nn.Module):
         super().__init__()
         self.d_model = args.d_model
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
-
-        # shards are moe_shard_pb2_grpc.MoeShardStub and thus cannot be dict key
-        self.expert_to_shard = args.ffn_config["expert_to_shard"]
-        self.shards = args.ffn_config["moe_shards"]
-
+        self.moe_shard_map = args.ffn_config["moe_shard_map"]
         self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
     async def execute_on_shard(
         self,
         shard: moe_shard_pb2_grpc.MoeShardStub,
+        assigned_experts: list,
         x: mx.array,  # 1-dimensional
     ):
         x_bytes = np.array(x.astype(mx.float32)).tobytes()
         outputs = await shard.Execute(moe_shard_pb2.Inputs(data=x_bytes))
         # reshape because np.frombuffer() interprets a buffer as a 1-dimensional array
         outputs = np.frombuffer(outputs.data, dtype=np.float32)
-        outputs = outputs.reshape((len(activated_experts), self.d_model))
-        return mx.array(outputs, dtype=mx.bfloat16)
+        return outputs.reshape((len(assigned_experts), self.d_model))
 
     async def __call__(self, x: mx.array) -> mx.array:
         ne = self.num_experts_per_tok
@@ -171,14 +167,20 @@ class DistributedSparseMoeBlock(nn.Module):
         y = []
         for xt, st, it in zip(x, scores, inds.tolist()):
             async with asyncio.TaskGroup() as tg:
-                exec_tasks = []
-                for si, shard in enumerate(self.shards):
-                    et = tg.create_task(
-                        self.execute_on_shard(shard, shard_to_experts[si], xt)
+                exec_tasks = {}
+                for url, d in self.moe_shard_map.items():
+                    exec_tasks[url] = tg.create_task(
+                        self.execute_on_shard(d["shard"], d["assigned_experts"], xt)
                     )
-                    exec_tasks.append(et)
 
-            yt = mx.concatenate([et.result() for et in exec_tasks], axis=0)
+            yt = []
+            activated = set(it)
+            for url, task in exec_tasks.items():
+                res = task.result() # np array cuz mlx indexing sucks
+                for i, e in enumerate(self.moe_shard_map[url]["assigned_experts"]):
+                    if e in activated:
+                        yt.append(mx.array(res[i], dtype=mx.bfloat16))
+
             yt = mx.stack(yt, axis=-1)
             yt = (yt * st).sum(axis=-1)
             y.append(yt)
@@ -249,16 +251,11 @@ class Driver:
 
         model_args = ModelArgs.from_dict(config)
 
-        model_args.ffn_config["expert_to_shard"] = {}
-        model_args.ffn_config["moe_shards"] = []
-        for url, experts in model_args.ffn_config["moe_shard_map"].items():
-            model_args.ffn_config["moe_shards"].append(url)
-            shard_i = len(model_args.ffn_config["moe_shards"]) - 1
-
-            for e in experts:
-                model_args.ffn_config["expert_to_shard"][e] = shard_i
-
-        del model_args.ffn_config["moe_shard_map"]
+        for url in list(model_args.ffn_config["moe_shard_map"].keys()):
+            assigned_experts = model_args.ffn_config["moe_shard_map"][url]
+            model_args.ffn_config["moe_shard_map"][url] = {
+                "assigned_experts": assigned_experts
+            }
 
         return model_args
 
@@ -369,13 +366,10 @@ class Driver:
     ) -> None:
         async with AsyncExitStack() as es:
             model_args = self.get_model_args()
-            shard_channels = [
-                await es.enter_async_context(grpc.aio.insecure_channel(url))
-                for url in model_args.ffn_config["moe_shards"]
-            ]
-            model_args.ffn_config["moe_shards"] = [
-                moe_shard_pb2_grpc.MoeShardStub(channel) for channel in shard_channels
-            ]
+            for url in list(model_args.ffn_config["moe_shard_map"].keys()):
+                channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
+                shard = moe_shard_pb2_grpc.MoeShardStub(channel)
+                model_args.ffn_config["moe_shard_map"][url]["shard"] = shard
 
             model = DistributedDBRX(model_args)
             weights = mx.load(str(self.model_path / f"non-expert.safetensors"))
