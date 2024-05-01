@@ -177,9 +177,12 @@ class DistributedSparseMoeBlock(nn.Module):
         async with asyncio.TaskGroup() as tg:
             exec_tasks = {}
             for url, d in self.moe_shard_map.items():
-                exec_tasks[url] = tg.create_task(
-                    self.execute_on_shard(d["shard"], len(d["expert_to_i"]), x)
+                task = tg.create_task(
+                    self.execute_on_shard(
+                        d["shard"], len(d["expert_to_i"]), batch_size, x
+                    )
                 )
+                exec_tasks[url] = task
 
         for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
             yt = []

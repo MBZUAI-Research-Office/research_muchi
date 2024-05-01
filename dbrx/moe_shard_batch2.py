@@ -45,17 +45,18 @@ class DistributedDBRX:
 
     def __call__(self, inputs: np.array) -> np.array:
         xs = mx.array(inputs, dtype=mx.bfloat16)
-        ys = []
+        expert_outs = []
 
-        # x.shape should be (6144,)
-        for x in xs:
-            expert_outs = []
-            for e in range(len(self.expert_generators)):
-                v1, w1, w2 = self.next_safe(e)
-                expert_outs.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
-            ys.append(mx.stack(expert_outs, axis=0).astype(mx.float32))
+        for e in range(len(self.expert_generators)):
+            v1, w1, w2 = self.next_safe(e)
+            ys = []
+            for x in xs:
+                ys.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
+            expert_outs.append(mx.stack(ys, axis=0).astype(mx.float32))
 
-        return np.array(ys)
+        res = mx.stack(expert_outs, axis=0)
+        res = mx.swapaxes(res, 0, 1)
+        return np.array(res)
 
 
 class MoeShardServicer(moe_shard_batch2_pb2_grpc.MoeShardServicer):
