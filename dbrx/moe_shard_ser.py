@@ -15,6 +15,7 @@ import mlx.nn as nn
 
 from serialization_utils import mx_to_bytes, bytes_to_mx
 
+
 class DistributedDBRX:
 
     def __init__(self, experts: list) -> None:
@@ -50,7 +51,7 @@ class DistributedDBRX:
             ys = []
             for x in inputs:
                 ys.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
-            expert_outs.append(mx.stack(ys, axis=0).astype(mx.float32))
+            expert_outs.append(mx.stack(ys, axis=0))
 
         res = mx.stack(expert_outs, axis=0)
         return mx.swapaxes(res, 0, 1)
@@ -64,7 +65,9 @@ class MoeShardServicer(moe_shard_ser_pb2_grpc.MoeShardServicer):
         self.model = self.load_model()
 
     def Execute(self, request: moe_shard_ser_pb2.Inputs, context):
-        inputs = bytes_to_mx(request.data)
+        inputs = bytes_to_mx(
+            request.data, (request.batch_size, self.model_args["d_model"])
+        )
         outputs = self.model(inputs)
         return moe_shard_ser_pb2.Outputs(data=mx_to_bytes(outputs))
 
