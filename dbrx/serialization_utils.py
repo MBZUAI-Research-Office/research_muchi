@@ -6,7 +6,7 @@ def mx_to_bytes(arr: mx.array) -> bytes:
     # convert mx.array to bytes
     arr_bytes = None
     with io.BytesIO() as buffer:
-        mx.savez(buffer, arr=arr)
+        mx.savez(buffer, arr=arr.astype(mx.float32))
         arr_bytes = buffer.getvalue()
     assert arr_bytes is not None
     return arr_bytes
@@ -19,7 +19,7 @@ def bytes_to_mx(a_bytes: bytes) -> mx.array:
         buffer.name = "xxx.npz"  # hack!
         arr = mx.load(buffer)
     assert arr is not None
-    return arr["arr"]
+    return arr["arr"].astype(mx.bfloat16)
 
 
 # def test_0():
