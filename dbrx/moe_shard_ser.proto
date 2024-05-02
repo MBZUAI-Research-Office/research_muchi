@@ -5,8 +5,7 @@ service MoeShard {
 }
 
 message Inputs {
-  int32 batch_size = 1;
-  bytes data = 2;
+  bytes data = 1;
 }
 
 message Outputs {
