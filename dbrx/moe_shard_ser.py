@@ -64,17 +64,17 @@ class MoeShardServicer(moe_shard_ser_pb2_grpc.MoeShardServicer):
         self.model_args = self.get_model_args(config_filename)
         self.model = self.load_model()
 
-    def Execute(self, request: moe_shard_ser_pb2.Inputs, context):
-        inputs = bytes_to_mx(
-            request.data, (request.batch_size, self.model_args["d_model"])
-        )
-        outputs = self.model(inputs)
-        return moe_shard_ser_pb2.Outputs(data=mx_to_bytes(outputs))
-
     # def Execute(self, request: moe_shard_ser_pb2.Inputs, context):
-    #     inputs = bytes_to_mx(request.data)
+    #     inputs = bytes_to_mx(
+    #         request.data, (request.batch_size, self.model_args["d_model"])
+    #     )
     #     outputs = self.model(inputs)
     #     return moe_shard_ser_pb2.Outputs(data=mx_to_bytes(outputs))
+
+    def Execute(self, request: moe_shard_ser_pb2.Inputs, context):
+        inputs = bytes_to_mx(request.data)
+        outputs = self.model(inputs)
+        return moe_shard_ser_pb2.Outputs(data=mx_to_bytes(outputs))
 
     def get_model_args(self, config_filename: str) -> dict:
         try:
