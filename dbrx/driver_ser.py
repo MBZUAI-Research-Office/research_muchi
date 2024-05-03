@@ -31,6 +31,7 @@ DEFAULT_TOP_P = 1.0
 
 # DEBUG
 # YS = []
+LOGS = []
 
 
 @dataclass
@@ -141,25 +142,25 @@ class DistributedSparseMoeBlock(nn.Module):
         self.moe_shard_map = args.ffn_config["moe_shard_map"]
         self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
-    # async def execute_on_shard(
-    #     self,
-    #     shard: moe_shard_ser_pb2_grpc.MoeShardStub,
-    #     n_assigned_experts: int,
-    #     batch_size: int,
-    #     x: mx.array,  # x.shape == (batch_size, self.d_model)
-    # ):
-    #     outputs = await shard.Execute(
-    #         moe_shard_ser_pb2.Inputs(batch_size=batch_size, data=mx_to_bytes(x))
-    #     )
-    #     return bytes_to_mx(outputs.data, (batch_size, n_assigned_experts, self.d_model))
-
     async def execute_on_shard(
         self,
         shard: moe_shard_ser_pb2_grpc.MoeShardStub,
+        n_assigned_experts: int,
+        batch_size: int,
         x: mx.array,  # x.shape == (batch_size, self.d_model)
     ):
-        outputs = await shard.Execute(moe_shard_ser_pb2.Inputs(data=mx_to_bytes(x)))
-        return bytes_to_mx(outputs.data)
+        outputs = await shard.Execute(
+            moe_shard_ser_pb2.Inputs(batch_size=batch_size, data=mx_to_bytes(x))
+        )
+        return bytes_to_mx(outputs.data, (batch_size, n_assigned_experts, self.d_model))
+
+    # async def execute_on_shard(
+    #     self,
+    #     shard: moe_shard_ser_pb2_grpc.MoeShardStub,
+    #     x: mx.array,  # x.shape == (batch_size, self.d_model)
+    # ):
+    #     outputs = await shard.Execute(moe_shard_ser_pb2.Inputs(data=mx_to_bytes(x)))
+    #     return bytes_to_mx(outputs.data)
 
     async def __call__(self, x: mx.array) -> mx.array:
         ne = self.num_experts_per_tok
@@ -180,12 +181,12 @@ class DistributedSparseMoeBlock(nn.Module):
         async with asyncio.TaskGroup() as tg:
             exec_tasks = {}
             for url, d in self.moe_shard_map.items():
-                # task = tg.create_task(
-                #     self.execute_on_shard(
-                #         d["shard"], len(d["expert_to_i"]), batch_size, x
-                #     )
-                # )
-                task = tg.create_task(self.execute_on_shard(d["shard"], x))
+                task = tg.create_task(
+                    self.execute_on_shard(
+                        d["shard"], len(d["expert_to_i"]), batch_size, x
+                    )
+                )
+                # task = tg.create_task(self.execute_on_shard(d["shard"], x))
                 exec_tasks[url] = task
 
         for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
@@ -216,8 +217,20 @@ class DistributedDecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
+        # DEBUG
+        tic = time.perf_counter()
+
         r, h, cache = self.norm_attn_norm(x, mask, cache)
+
+        mx.eval(r, h, cache)
+        attention_latency = time.perf_counter() - tic
+        tic = time.perf_counter()
+
         out = (await self.ffn(h)) + r
+
+        moe_latency = time.perf_counter() - tic
+        LOGS.append((attention_latency, moe_latency))
+
         return out, cache
 
 
@@ -406,6 +419,10 @@ class Driver:
             #     "moe_shard_batch2_ys",
             #     **{f"arr_{i}": arr for i, arr in enumerate(YS)},
             # )
+            with open(Path("./latencies.csv"), "w") as logs:
+                logs.write("attention,moe\n")
+                for vals in LOGS:
+                    logs.write(f"{vals[0]},{vals[1]}\n")
 
 
 if __name__ == "__main__":
