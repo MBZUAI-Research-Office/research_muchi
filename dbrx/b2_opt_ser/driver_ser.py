@@ -28,7 +28,7 @@ DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 
 # DEBUG
-LOGS = []
+# LOGS = []
 
 
 @dataclass
@@ -189,8 +189,8 @@ class DistributedSparseMoeBlock(nn.Module):
         orig_shape = x.shape
 
         # DEBUG
-        print("-----pre-shard calc started-----", flush=True)
-        tic = time.perf_counter()
+        # print("-----pre-shard calc started-----", flush=True)
+        # tic = time.perf_counter()
 
         x = x.reshape(-1, x.shape[-1])
 
@@ -203,16 +203,16 @@ class DistributedSparseMoeBlock(nn.Module):
         scores = scores.astype(x.dtype)
 
         # DEBUG
+        mx.eval(inds, scores)  # fucking magic: from 2.251 t/s to 2.988 t/s
         x_bytes = mx_to_bytes(x)
-        mx.eval(inds, scores)
-        pre_shard_latency = time.perf_counter() - tic
+        # pre_shard_latency = time.perf_counter() - tic
 
         y = []
         batch_size = x.shape[0]
 
         # DEBUG
-        print("-----shard calc started-----", flush=True)
-        tic = time.perf_counter()
+        # print("-----shard calc started-----", flush=True)
+        # tic = time.perf_counter()
 
         async with asyncio.TaskGroup() as tg:
             exec_tasks = {}
@@ -226,9 +226,9 @@ class DistributedSparseMoeBlock(nn.Module):
                 exec_tasks[url] = task
 
         # DEBUG
-        shard_latency = time.perf_counter() - tic
-        print("-----post-shard calc started-----", flush=True)
-        tic = time.perf_counter()
+        # shard_latency = time.perf_counter() - tic
+        # print("-----post-shard calc started-----", flush=True)
+        # tic = time.perf_counter()
 
         for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
             yt = []
@@ -245,13 +245,13 @@ class DistributedSparseMoeBlock(nn.Module):
         y = mx.stack(y, axis=0)
 
         # DEBUG
-        y = y.reshape(orig_shape)
-        mx.eval(y)
-        post_shard_latency = time.perf_counter() - tic
-        LOGS.append((pre_shard_latency, shard_latency, post_shard_latency))
-        return y
+        # y = y.reshape(orig_shape)
+        # mx.eval(y)
+        # post_shard_latency = time.perf_counter() - tic
+        # LOGS.append((pre_shard_latency, shard_latency, post_shard_latency))
+        # return y
 
-        # return y.reshape(orig_shape)
+        return y.reshape(orig_shape)
 
 
 class DistributedDecoderLayer(nn.Module):
@@ -437,9 +437,7 @@ class Driver:
             + f"= {((n - 1) / gen_time):.3f} t/s"
         )
 
-    async def start(
-        self, prompt: str, max_tokens: int, temp: float
-    ) -> None:
+    async def start(self, prompt: str, max_tokens: int, temp: float) -> None:
         async with AsyncExitStack() as es:
             model_args = self.get_model_args()
             for url in list(model_args.ffn_config["moe_shard_map"].keys()):
@@ -460,10 +458,10 @@ class Driver:
             await self.generate(model, tokenizer, prompt, max_tokens, temp)
 
             # DEBUG
-            with open(Path("./latencies.csv"), "w") as logs:
-                logs.write(",pre_shard,shard,post_shard\n")
-                for i, vals in enumerate(LOGS):
-                    logs.write(f"{i + 1},{vals[0]},{vals[1]},{vals[2]}\n")
+            # with open(Path("./latencies.csv"), "w") as logs:
+            #     logs.write(",pre_shard,shard,post_shard\n")
+            #     for i, vals in enumerate(LOGS):
+            #         logs.write(f"{i + 1},{vals[0]},{vals[1]},{vals[2]}\n")
 
 
 if __name__ == "__main__":
