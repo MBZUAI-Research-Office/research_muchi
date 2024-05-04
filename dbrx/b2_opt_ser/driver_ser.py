@@ -7,41 +7,48 @@ from pathlib import Path
 from typing import Optional, Tuple
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import time
 
 import grpc
-import moe_shard_batch2_pb2
-import moe_shard_batch2_pb2_grpc
-
-import numpy as np
+import moe_shard_ser_pb2
+import moe_shard_ser_pb2_grpc
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
-from base import BaseModelArgs
-from sample_utils import top_p_sampling
+from serialization_utils import mx_to_bytes, bytes_to_mx
 
 DEFAULT_PROMPT = "hello"
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
-DEFAULT_TOP_P = 1.0
 
 # DEBUG
-# YS = []
+LOGS = []
 
 
 @dataclass
-class ModelArgs(BaseModelArgs):
+class ModelArgs:
     vocab_size: int
     d_model: int
     ffn_config: dict
     attn_config: dict
     n_layers: int
     n_heads: int
+
+    @classmethod
+    def from_dict(cls, params):
+        return cls(
+            **{
+                k: v
+                for k, v in params.items()
+                if k in inspect.signature(cls).parameters
+            }
+        )
 
 
 class Attention(nn.Module):
@@ -144,23 +151,47 @@ class DistributedSparseMoeBlock(nn.Module):
 
     async def execute_on_shard(
         self,
-        shard: moe_shard_batch2_pb2_grpc.MoeShardStub,
-        n_assigned_experts: int,
-        batch_size: int,
-        x: mx.array,  # x.shape == (batch_size, self.d_model)
+        shard: moe_shard_ser_pb2_grpc.MoeShardStub,
+        x_bytes: bytes,  # x.shape == (batch_size, self.d_model)
     ):
-        x_bytes = np.array(x.astype(mx.float32)).tobytes()
-        outputs = await shard.Execute(
-            moe_shard_batch2_pb2.Inputs(batch_size=batch_size, data=x_bytes)
-        )
-        # reshape because np.frombuffer() interprets a buffer as a 1-dimensional array
-        outputs = np.frombuffer(outputs.data, dtype=np.float32)
-        outputs = outputs.reshape((batch_size, n_assigned_experts, self.d_model))
-        return mx.array(outputs, dtype=mx.bfloat16)
+        outputs = await shard.Execute(moe_shard_ser_pb2.Inputs(data=x_bytes))
+        return bytes_to_mx(outputs.data)
+
+    # async def execute_on_shard(
+    #     self,
+    #     shard: moe_shard_ser_pb2_grpc.MoeShardStub,
+    #     n_assigned_experts: int,
+    #     batch_size: int,
+    #     x_bytes: bytes,  # x.shape == (batch_size, self.d_model)
+    # ):
+    #     outputs = await shard.Execute(
+    #         moe_shard_ser_pb2.Inputs(batch_size=batch_size, data=x_bytes)
+    #     )
+    #     return bytes_to_mx(outputs.data, (batch_size, n_assigned_experts, self.d_model))
+
+    #     shard_outs = {}
+    #     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+    #         exec_tasks = {}
+    #         for url, d in self.moe_shard_map.items():
+    #             task = executor.submit(self.execute_on_shard, d["shard"], len(d["expert_to_i"]), batch_size, x)
+    #             # task = executor.submit(self.execute_on_shard, d["shard"], x)
+    #             exec_tasks[task] = url
+    #         for future in concurrent.futures.as_completed(exec_tasks):
+    #             url = exec_tasks[future]
+    #             try:
+    #                 shard_outs[url] = future.result()
+    #             except Exception as error:
+    #                 executor.shutdown()
+    #                 raise error
 
     async def __call__(self, x: mx.array) -> mx.array:
         ne = self.num_experts_per_tok
         orig_shape = x.shape
+
+        # DEBUG
+        print("-----pre-shard calc started-----", flush=True)
+        tic = time.perf_counter()
+
         x = x.reshape(-1, x.shape[-1])
 
         gates = self.router(x)
@@ -171,18 +202,33 @@ class DistributedSparseMoeBlock(nn.Module):
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
 
+        # DEBUG
+        x_bytes = mx_to_bytes(x)
+        mx.eval(inds, scores)
+        pre_shard_latency = time.perf_counter() - tic
+
         y = []
         batch_size = x.shape[0]
+
+        # DEBUG
+        print("-----shard calc started-----", flush=True)
+        tic = time.perf_counter()
 
         async with asyncio.TaskGroup() as tg:
             exec_tasks = {}
             for url, d in self.moe_shard_map.items():
-                task = tg.create_task(
-                    self.execute_on_shard(
-                        d["shard"], len(d["expert_to_i"]), batch_size, x
-                    )
-                )
+                # task = tg.create_task(
+                #     self.execute_on_shard(
+                #         d["shard"], len(d["expert_to_i"]), batch_size, x_bytes
+                #     )
+                # )
+                task = tg.create_task(self.execute_on_shard(d["shard"], x_bytes))
                 exec_tasks[url] = task
+
+        # DEBUG
+        shard_latency = time.perf_counter() - tic
+        print("-----post-shard calc started-----", flush=True)
+        tic = time.perf_counter()
 
         for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
             yt = []
@@ -197,7 +243,15 @@ class DistributedSparseMoeBlock(nn.Module):
             y.append(yt)
 
         y = mx.stack(y, axis=0)
-        return y.reshape(orig_shape)
+
+        # DEBUG
+        y = y.reshape(orig_shape)
+        mx.eval(y)
+        post_shard_latency = time.perf_counter() - tic
+        LOGS.append((pre_shard_latency, shard_latency, post_shard_latency))
+        return y
+
+        # return y.reshape(orig_shape)
 
 
 class DistributedDecoderLayer(nn.Module):
@@ -212,6 +266,20 @@ class DistributedDecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
+        # DEBUG
+        # tic = time.perf_counter()
+
+        # r, h, cache = self.norm_attn_norm(x, mask, cache)
+
+        # mx.eval(r, h, cache)
+        # attention_latency = time.perf_counter() - tic
+        # tic = time.perf_counter()
+
+        # out = (await self.ffn(h)) + r
+
+        # moe_latency = time.perf_counter() - tic
+        # LOGS.append((attention_latency, moe_latency))
+
         r, h, cache = self.norm_attn_norm(x, mask, cache)
         out = (await self.ffn(h)) + r
         return out, cache
@@ -278,7 +346,6 @@ class Driver:
         model: nn.Module,
         prompt: mx.array,
         temp: float,
-        top_p: float,
     ) -> AsyncGenerator[Tuple[mx.array, mx.array]]:
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
@@ -287,10 +354,7 @@ class Driver:
             if temp == 0:
                 token = mx.argmax(logits, axis=-1)
             else:
-                if top_p > 0 and top_p < 1.0:
-                    token = top_p_sampling(logits, top_p, temp)
-                else:
-                    token = mx.random.categorical(logits * (1 / temp))
+                token = mx.random.categorical(logits * (1 / temp))
 
             prob = softmax_logits[0, token]
             return token, prob
@@ -311,7 +375,6 @@ class Driver:
         prompt: str,
         max_tokens: int,
         temp: float,
-        top_p: float,
     ) -> str:
         print("=" * 10)
         print("Prompt:", prompt)
@@ -329,7 +392,6 @@ class Driver:
             model,
             prompt_tokens,
             temp,
-            top_p,
         ):
             if n >= max_tokens:
                 break
@@ -376,13 +438,13 @@ class Driver:
         )
 
     async def start(
-        self, prompt: str, max_tokens: int, temp: float, top_p: float
+        self, prompt: str, max_tokens: int, temp: float
     ) -> None:
         async with AsyncExitStack() as es:
             model_args = self.get_model_args()
             for url in list(model_args.ffn_config["moe_shard_map"].keys()):
                 channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
-                shard = moe_shard_batch2_pb2_grpc.MoeShardStub(channel)
+                shard = moe_shard_ser_pb2_grpc.MoeShardStub(channel)
                 model_args.ffn_config["moe_shard_map"][url]["shard"] = shard
 
             model = DistributedDBRX(model_args)
@@ -395,13 +457,13 @@ class Driver:
                 self.model_path, trust_remote_code=True
             )
 
-            await self.generate(model, tokenizer, prompt, max_tokens, temp, top_p)
+            await self.generate(model, tokenizer, prompt, max_tokens, temp)
 
             # DEBUG
-            # mx.savez(
-            #     "moe_shard_batch2_ys",
-            #     **{f"arr_{i}": arr for i, arr in enumerate(YS)},
-            # )
+            with open(Path("./latencies.csv"), "w") as logs:
+                logs.write(",pre_shard,shard,post_shard\n")
+                for i, vals in enumerate(LOGS):
+                    logs.write(f"{i + 1},{vals[0]},{vals[1]},{vals[2]}\n")
 
 
 if __name__ == "__main__":
@@ -422,9 +484,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--temp", type=float, default=DEFAULT_TEMP, help="Sampling temperature"
     )
-    parser.add_argument(
-        "--top-p", type=float, default=DEFAULT_TOP_P, help="Sampling top-p"
-    )
     args = parser.parse_args()
 
     # DEBUG
@@ -432,4 +491,4 @@ if __name__ == "__main__":
 
     logging.basicConfig()
     driver = Driver(args.model_path)
-    asyncio.run(driver.start(args.prompt, args.max_tokens, args.temp, args.top_p))
+    asyncio.run(driver.start(args.prompt, args.max_tokens, args.temp))

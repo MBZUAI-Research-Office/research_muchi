@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-import moe_shard_pb2 as moe__shard__pb2
+import moe_shard_batch1_pb2 as moe__shard__batch1__pb2
 
 
 class MoeShardStub(object):
@@ -16,8 +16,8 @@ class MoeShardStub(object):
         """
         self.Execute = channel.unary_unary(
                 '/MoeShard/Execute',
-                request_serializer=moe__shard__pb2.Inputs.SerializeToString,
-                response_deserializer=moe__shard__pb2.Outputs.FromString,
+                request_serializer=moe__shard__batch1__pb2.Inputs.SerializeToString,
+                response_deserializer=moe__shard__batch1__pb2.Outputs.FromString,
                 )
 
 
@@ -35,8 +35,8 @@ def add_MoeShardServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Execute': grpc.unary_unary_rpc_method_handler(
                     servicer.Execute,
-                    request_deserializer=moe__shard__pb2.Inputs.FromString,
-                    response_serializer=moe__shard__pb2.Outputs.SerializeToString,
+                    request_deserializer=moe__shard__batch1__pb2.Inputs.FromString,
+                    response_serializer=moe__shard__batch1__pb2.Outputs.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -60,7 +60,7 @@ class MoeShard(object):
             timeout=None,
             metadata=None):
         return grpc.experimental.unary_unary(request, target, '/MoeShard/Execute',
-            moe__shard__pb2.Inputs.SerializeToString,
-            moe__shard__pb2.Outputs.FromString,
+            moe__shard__batch1__pb2.Inputs.SerializeToString,
+            moe__shard__batch1__pb2.Outputs.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

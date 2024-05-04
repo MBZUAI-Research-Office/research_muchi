@@ -122,9 +122,9 @@ def main():
     for e, port in enumerate(ports):
         Cmd(f"""tmux send-keys -t {e} 'clear' Enter \;""")
         Cmd(f"""tmux send-keys -t {e} 'conda activate dbrx_poc' Enter \;""")
-        Cmd(f"""tmux send-keys -t {e} 'cd ~/research_muchi/dbrx/' Enter \;""")
+        Cmd(f"""tmux send-keys -t {e} 'cd ~/research_muchi/dbrx/batch1' Enter \;""")
         Cmd(
-            f"""tmux send-keys -t {e} 'python moe_shard.py --port {port}"""
+            f"""tmux send-keys -t {e} 'python moe_shard_batch1.py --port {port}"""
             + f""" --model-path ~/dbrx-base/distributable/batch1"""
             + f""" --config-filename moe_shard_config_{e}.json' Enter \;""",
         )

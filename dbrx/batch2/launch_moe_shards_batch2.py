@@ -1,9 +1,9 @@
 # Examples:
 #  launch all shards:
-#    python launch_moe_shards.py --model-path ~/dbrx-base/distributable/batch1/
+#    python launch_moe_shards_batch2.py --model-path ~/dbrx-base/distributable/batch2/
 #
 #  terminate all shards:
-#    python launch_moe_shards.py --model-path ~/dbrx-base/distributable/batch1/ --terminate
+#    python launch_moe_shards_batch2.py --model-path ~/dbrx-base/distributable/batch2/ --terminate
 import subprocess
 import time
 from types import SimpleNamespace
@@ -120,12 +120,12 @@ def main():
     for url, ports in url_port_map.items():
         print(f"Shard: {url} {ports} ", end="")
         Cmd(
-            f"""scp -i ~/.ssh/id_llamacpp ./run_shard.py xiangruike@{url}:/users/xiangruike"""
+            f"""scp -i ~/.ssh/id_llamacpp ./run_shard_batch2.py xiangruike@{url}:/users/xiangruike"""
         )
         if args.terminate:
             rc, out, err = Cmd(
                 f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard.py --ports "{','.join(ports)}" --terminate'"""
+                + f"""&& python3 /Users/xiangruike/run_shard_batch2.py --ports "{','.join(ports)}" --terminate'"""
             )
             if rc != 0:
                 print(err.strip())
@@ -134,7 +134,7 @@ def main():
         else:
             rc, out, err = Cmd(
                 f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard.py --ports "{','.join(ports)}"'"""
+                + f"""&& python3 /Users/xiangruike/run_shard_batch2.py --ports "{','.join(ports)}"'"""
             )
             if rc != 0:
                 print(err.strip())

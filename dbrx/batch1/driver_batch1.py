@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Optional, Tuple
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import time
 
 import grpc
-import moe_shard_pb2
-import moe_shard_pb2_grpc
+import moe_shard_batch1_pb2
+import moe_shard_batch1_pb2_grpc
 
 import numpy as np
 
@@ -22,28 +23,29 @@ import mlx.nn as nn
 
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
-from base import BaseModelArgs
-from sample_utils import top_p_sampling
-
 DEFAULT_PROMPT = "hello"
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
-DEFAULT_TOP_P = 1.0
-
-# DEBUG
-# XS = []
-# YS = []
-# ACTIVATED = []
 
 
 @dataclass
-class ModelArgs(BaseModelArgs):
+class ModelArgs:
     vocab_size: int
     d_model: int
     ffn_config: dict
     attn_config: dict
     n_layers: int
     n_heads: int
+
+    @classmethod
+    def from_dict(cls, params):
+        return cls(
+            **{
+                k: v
+                for k, v in params.items()
+                if k in inspect.signature(cls).parameters
+            }
+        )
 
 
 class Attention(nn.Module):
@@ -141,7 +143,7 @@ class DistributedSparseMoeBlock(nn.Module):
         self.d_model = args.d_model
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
 
-        # shards are moe_shard_pb2_grpc.MoeShardStub and thus cannot be dict key
+        # shards are moe_shard_batch1_pb2_grpc.MoeShardStub and thus cannot be dict key
         self.expert_to_shard = args.ffn_config["expert_to_shard"]
         self.shards = args.ffn_config["moe_shards"]
 
@@ -149,13 +151,13 @@ class DistributedSparseMoeBlock(nn.Module):
 
     async def execute_on_shard(
         self,
-        shard: moe_shard_pb2_grpc.MoeShardStub,
+        shard: moe_shard_batch1_pb2_grpc.MoeShardStub,
         block_num: int,
         activated_experts: list,
         x: mx.array,  # 1-dimensional
     ):
         outputs = await shard.Execute(
-            moe_shard_pb2.Inputs(
+            moe_shard_batch1_pb2.Inputs(
                 block_num=block_num,
                 activated_experts=np.array(activated_experts).tobytes(),
                 data=np.array(x.astype(mx.float32)).tobytes(),
@@ -182,7 +184,8 @@ class DistributedSparseMoeBlock(nn.Module):
 
         y = []
         for xt, st, it in zip(x, scores, inds.tolist()):
-            # TODO: might need fixing
+            # TODO: needs fixing
+            # expert output should align with order of it array
             shard_to_experts = {}
             for e in it:
                 shard_to_experts.setdefault(self.expert_to_shard[e], []).append(e)
@@ -196,11 +199,6 @@ class DistributedSparseMoeBlock(nn.Module):
                     )
                     for si, activated_experts in shard_to_experts.items()
                 ]
-
-            # DEBUG
-            # XS.append(xt)
-            # YS.append(mx.concatenate([task.result() for task in shard_tasks], axis=0))
-            # ACTIVATED.append(it)
 
             yt = mx.stack(
                 mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1
@@ -293,7 +291,6 @@ class Driver:
         model: nn.Module,
         prompt: mx.array,
         temp: float,
-        top_p: float,
     ) -> AsyncGenerator[Tuple[mx.array, mx.array]]:
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
@@ -302,10 +299,7 @@ class Driver:
             if temp == 0:
                 token = mx.argmax(logits, axis=-1)
             else:
-                if top_p > 0 and top_p < 1.0:
-                    token = top_p_sampling(logits, top_p, temp)
-                else:
-                    token = mx.random.categorical(logits * (1 / temp))
+                token = mx.random.categorical(logits * (1 / temp))
 
             prob = softmax_logits[0, token]
             return token, prob
@@ -326,7 +320,6 @@ class Driver:
         prompt: str,
         max_tokens: int,
         temp: float,
-        top_p: float,
     ) -> str:
         print("=" * 10)
         print("Prompt:", prompt)
@@ -344,12 +337,11 @@ class Driver:
             model,
             prompt_tokens,
             temp,
-            top_p,
         ):
             if n >= max_tokens:
                 break
 
-            token = token.item() # get word ID
+            token = token.item()  # get word ID
             if n == 0:
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
@@ -358,12 +350,9 @@ class Driver:
                 break
             tokens.append(token)
 
-            s = tokenizer.decode(tokens) # str
+            s = tokenizer.decode(tokens)  # str
             if s[-1] != REPLACEMENT_CHAR:
-                # DEV
                 print(s[skip:], end="", flush=True)
-                # print("-" * 20, flush=True)
-
                 skip = len(s)
             # Reset token cache at line break
             if s[-1] == "\n":
@@ -390,9 +379,7 @@ class Driver:
             + f"= {((n - 1) / gen_time):.3f} t/s"
         )
 
-    async def start(
-        self, prompt: str, max_tokens: int, temp: float, top_p: float
-    ) -> None:
+    async def start(self, prompt: str, max_tokens: int, temp: float) -> None:
         async with AsyncExitStack() as es:
             model_args = self.get_model_args()
             shard_channels = [
@@ -400,7 +387,8 @@ class Driver:
                 for url in model_args.ffn_config["moe_shards"]
             ]
             model_args.ffn_config["moe_shards"] = [
-                moe_shard_pb2_grpc.MoeShardStub(channel) for channel in shard_channels
+                moe_shard_batch1_pb2_grpc.MoeShardStub(channel)
+                for channel in shard_channels
             ]
 
             model = DistributedDBRX(model_args)
@@ -413,32 +401,7 @@ class Driver:
                 self.model_path, trust_remote_code=True
             )
 
-            await self.generate(model, tokenizer, prompt, max_tokens, temp, top_p)
-
-            # DEBUG
-            # with (
-            #     open(Path("./shard_activation.csv"), "a") as shard_activation_logs,
-            #     open(Path("./expert_activation.csv"), "a") as expert_activation_logs,
-            # ):
-            #     for experts, shard_to_experts in LOGS:
-            #         shard_activation_row = []
-            #         for si in range(4):
-            #             shard_activation_row.append(
-            #                 "0"
-            #                 if si not in shard_to_experts
-            #                 else str(len(shard_to_experts[si]))
-            #             )
-
-            #         expert_activation_row = []
-            #         es = set(experts)
-            #         for e in range(16):
-            #             expert_activation_row.append("1" if e in es else "0")
-
-            #         shard_activation_logs.write(",".join(shard_activation_row) + "\n")
-            #         expert_activation_logs.write(",".join(expert_activation_row) + "\n")
-            # mx.savez("moe_shard_xs", **{f"arr_{i}": arr for i, arr in enumerate(XS)})
-            # mx.savez("moe_shard_ys", **{f"arr_{i}": arr for i, arr in enumerate(YS)})
-            # mx.savez("moe_shard_activated", **{f"arr_{i}": mx.array(arr) for i, arr in enumerate(ACTIVATED)})
+            await self.generate(model, tokenizer, prompt, max_tokens, temp)
 
 
 if __name__ == "__main__":
@@ -459,9 +422,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--temp", type=float, default=DEFAULT_TEMP, help="Sampling temperature"
     )
-    parser.add_argument(
-        "--top-p", type=float, default=DEFAULT_TOP_P, help="Sampling top-p"
-    )
     args = parser.parse_args()
 
     # DEBUG
@@ -469,4 +429,4 @@ if __name__ == "__main__":
 
     logging.basicConfig()
     driver = Driver(args.model_path)
-    asyncio.run(driver.start(args.prompt, args.max_tokens, args.temp, args.top_p))
+    asyncio.run(driver.start(args.prompt, args.max_tokens, args.temp))

@@ -4,19 +4,18 @@ from dataclasses import dataclass
 from pathlib import Path
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 
 import grpc
-import moe_shard_pb2
-import moe_shard_pb2_grpc
+import moe_shard_batch1_pb2
+import moe_shard_batch1_pb2_grpc
 
 import numpy as np
 
 import mlx.core as mx
 import mlx.nn as nn
-
-from base import BaseModelArgs
 
 # coroutines to be invoked when the event loop is shutting down
 # copied from:
@@ -25,10 +24,20 @@ _cleanup_coroutines = []
 
 
 @dataclass
-class ModelArgs(BaseModelArgs):
+class ModelArgs:
     d_model: int
     ffn_config: dict
     n_layers: int
+
+    @classmethod
+    def from_dict(cls, params):
+        return cls(
+            **{
+                k: v
+                for k, v in params.items()
+                if k in inspect.signature(cls).parameters
+            }
+        )
 
 
 class MLP(nn.Module):
@@ -79,36 +88,21 @@ class DistributedDBRX(nn.Module):
         return np.array(outputs.astype(mx.float32))
 
 
-class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
+class MoeShardServicer(moe_shard_batch1_pb2_grpc.MoeShardServicer):
 
     def __init__(self, model_path: str, config_filename: str) -> None:
         self.model_path = Path(model_path)
         self.model = self.load_model(config_filename)
 
     async def Execute(
-        self, request: moe_shard_pb2.Inputs, context: grpc.aio.ServicerContext
+        self, request: moe_shard_batch1_pb2.Inputs, context: grpc.aio.ServicerContext
     ):
-        # DEV
-        activated_experts = np.frombuffer(request.activated_experts, dtype=np.int64)
-        print(f"start executing: {activated_experts}", flush=True)
-        print("-" * 10, flush=True)
-
-        # outputs = self.model(
-        #     request.block_num,
-        #     np.frombuffer(request.activated_experts, dtype=np.int64),
-        #     np.frombuffer(request.data, dtype=np.float32),
-        # )
         outputs = self.model(
             request.block_num,
-            activated_experts,
+            np.frombuffer(request.activated_experts, dtype=np.int64),
             np.frombuffer(request.data, dtype=np.float32),
         )
-
-        # DEV
-        print("done executing", flush=True)
-        print("-" * 10, flush=True)
-
-        return moe_shard_pb2.Outputs(data=outputs.tobytes())
+        return moe_shard_batch1_pb2.Outputs(data=outputs.tobytes())
 
     def load_model(self, config_filename: str) -> nn.Module:
         try:
@@ -146,7 +140,7 @@ class MoeShardServicer(moe_shard_pb2_grpc.MoeShardServicer):
 
 async def serve(port: int, model_path: str, config_filename: str):
     server = grpc.aio.server()
-    moe_shard_pb2_grpc.add_MoeShardServicer_to_server(
+    moe_shard_batch1_pb2_grpc.add_MoeShardServicer_to_server(
         MoeShardServicer(model_path, config_filename), server
     )
     listen_addr = f"[::]:{port}"
