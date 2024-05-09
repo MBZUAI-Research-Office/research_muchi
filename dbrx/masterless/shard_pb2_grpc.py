@@ -14,15 +14,26 @@ class ShardStub(object):
         Args:
             channel: A grpc.Channel.
         """
+        self.Start = channel.unary_unary(
+                '/Shard/Start',
+                request_serializer=shard__pb2.Inputs.SerializeToString,
+                response_deserializer=shard__pb2.Outputs.FromString,
+                )
         self.Receive = channel.unary_unary(
                 '/Shard/Receive',
-                request_serializer=shard__pb2.ExpertOuts.SerializeToString,
+                request_serializer=shard__pb2.ShardOuts.SerializeToString,
                 response_deserializer=shard__pb2.Empty.FromString,
                 )
 
 
 class ShardServicer(object):
     """Missing associated documentation comment in .proto file."""
+
+    def Start(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
     def Receive(self, request, context):
         """Missing associated documentation comment in .proto file."""
@@ -33,9 +44,14 @@ class ShardServicer(object):
 
 def add_ShardServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'Start': grpc.unary_unary_rpc_method_handler(
+                    servicer.Start,
+                    request_deserializer=shard__pb2.Inputs.FromString,
+                    response_serializer=shard__pb2.Outputs.SerializeToString,
+            ),
             'Receive': grpc.unary_unary_rpc_method_handler(
                     servicer.Receive,
-                    request_deserializer=shard__pb2.ExpertOuts.FromString,
+                    request_deserializer=shard__pb2.ShardOuts.FromString,
                     response_serializer=shard__pb2.Empty.SerializeToString,
             ),
     }
@@ -49,6 +65,23 @@ class Shard(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
+    def Start(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/Shard/Start',
+            shard__pb2.Inputs.SerializeToString,
+            shard__pb2.Outputs.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
     def Receive(request,
             target,
             options=(),
@@ -60,7 +93,7 @@ class Shard(object):
             timeout=None,
             metadata=None):
         return grpc.experimental.unary_unary(request, target, '/Shard/Receive',
-            shard__pb2.ExpertOuts.SerializeToString,
+            shard__pb2.ShardOuts.SerializeToString,
             shard__pb2.Empty.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

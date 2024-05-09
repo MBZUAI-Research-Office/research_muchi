@@ -1,6 +1,8 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
+from collections.abc import AsyncGenerator
 from concurrent import futures
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -10,6 +12,7 @@ import inspect
 import json
 import logging
 import pickle
+import time
 
 import grpc
 import shard_pb2
@@ -18,7 +21,17 @@ import shard_pb2_grpc
 import mlx.core as mx
 import mlx.nn as nn
 
+from transformers import AutoTokenizer, PreTrainedTokenizer
+
 from serialization_utils import mx_to_bytes, bytes_to_mx
+
+DEFAULT_TEMP = 0.6
+DEFAULT_SEED = 7
+
+# coroutines to be invoked when the event loop is shutting down
+# copied from:
+# https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
+_cleanup_coroutines = []
 
 
 @dataclass
@@ -130,62 +143,15 @@ class Router(nn.Module):
         return self.layer(x)
 
 
-class DecoderLayer(nn.Module):
-    def __init__(self, args: ModelArgs):
-        super().__init__()
-        self.ffn = DistributedSparseMoeBlock(args)
-        self.norm_attn_norm = NormAttnNorm(args)
-
-    async def __call__(
-        self,
-        x: mx.array,
-        mask: Optional[mx.array] = None,
-        cache: Optional[Tuple[mx.array, mx.array]] = None,
-    ) -> mx.array:
-        r, h, cache = self.norm_attn_norm(x, mask, cache)
-        out = (await self.ffn(h)) + r
-        return out, cache
-
-
-class DBRX(nn.Module):
-    def __init__(self, args: ModelArgs):
-        super().__init__()
-        self.vocab_size = args.vocab_size
-        self.wte = nn.Embedding(args.vocab_size, args.d_model)
-        self.blocks = [DecoderLayer(args) for _ in range(args.n_layers)]
-        self.moe = MoE()
-        self.norm_f = nn.LayerNorm(args.d_model, bias=False)
-        self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
-
-    async def __call__(
-        self,
-        inputs: mx.array,
-        cache=None,
-    ):
-        h = self.wte(inputs)
-
-        mask = None
-        T = h.shape[1]
-        if T > 1:
-            mask = nn.MultiHeadAttention.create_additive_causal_mask(T)
-            mask = mask.astype(h.dtype)
-
-        if cache is None:
-            cache = [None] * len(self.blocks)
-
-        self.moe.reset_expert_generators()
-        for e, layer in enumerate(self.blocks):
-            h, cache[e] = await layer(h, mask, cache[e])
-
-        return self.lm_head(self.norm_f(h)), cache
-
-
 class MoeShard:
 
     def __init__(
-        self, other_shards: list[shard_pb2_grpc.ShardStub], experts: dict
+        self,
+        url: str,
+        experts: dict,
     ) -> None:
-        self.other_shards = other_shards
+        self.url = url
+        self.other_shards = None  # set when inference call is made
         self.experts = experts
         self.act_fn = nn.silu
 
@@ -206,9 +172,11 @@ class MoeShard:
     async def send(
         self, shard: shard_pb2_grpc.ShardStub, arr_bytes: bytes, arr_map_bytes: bytes
     ):
-        await shard.Receive(shard_pb2.ExpertOuts(data=arr_bytes, arr_map=arr_map_bytes))
+        await shard.Receive(
+            shard_pb2.ShardOuts(url=self.url, data=arr_bytes, arr_map=arr_map_bytes)
+        )
 
-    async def __call__(self, inputs: mx.array, jobs: list) -> Tuple[mx.array, dict]:
+    async def __call__(self, inputs: mx.array, jobs: list) -> None:
         # sample jobs:
         # [[{14}, 1], [{}, 2]]
         # for each job,
@@ -244,20 +212,10 @@ class DistributedMoeBlock(nn.Module):
         super().__init__()
         self.d_model = args.d_model
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
-        self.shard_url = args.ffn_config["shard_url"]
-        self.shard_map = args.ffn_config["shard_map"]
         self.expert_map = args.ffn_config["expert_map"]
         self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
-        # self.activated_experts = None
-        # self.expert_outs = None
 
-    def reset(self) -> None:
-        pass
-
-    def receive(self, shard_url: str, expert_outs: mx.array) -> None:
-        pass
-
-    def design_jobs(self, inds: list[list[int]]):
+    def design_jobs(self, inds: list[list[int]], my_url: str) -> list:
         jobs = []
 
         for activated_experts in inds:
@@ -266,7 +224,7 @@ class DistributedMoeBlock(nn.Module):
 
             for e in activated_experts:
                 url = self.expert_map[e]
-                if url == self.shard_url:
+                if url == my_url:
                     job[0].add(e)
                 shard_loads[url] = shard_loads.get(url, 0) + 1
 
@@ -275,7 +233,9 @@ class DistributedMoeBlock(nn.Module):
 
         return jobs
 
-    async def __call__(self, x: mx.array) -> mx.array:
+    async def __call__(
+        self, x: mx.array, shard: MoeShard, buffer: dict, sync_complete: asyncio.Event
+    ) -> mx.array:
         ne = self.num_experts_per_tok
         orig_shape = x.shape
         x = x.reshape(-1, x.shape[-1])
@@ -287,60 +247,277 @@ class DistributedMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
+        mx.eval(inds, scores)
 
-        # mx.eval(inds, scores)
+        inds = inds.tolist()
+        jobs = self.design_jobs(inds)
+
+        await shard(x, jobs)
+        await sync_complete.wait()
 
         y = []
-        batch_size = x.shape[0]
 
-        for xt, st, it in zip(x, scores, inds.tolist()):
-            pass
+        for bi, st, it in zip(range(x.shape[0]), scores, inds):
+            yt = []
+            for e in it:
+                url = self.expert_map[e]
+                expert_outs = buffer[url]["expert_outs"]
+                eoi = buffer[url]["arr_map"][f"{bi}.{e}"]
+                yt.append(expert_outs[eoi])
+
+            yt = mx.stack(yt, axis=-1)
+            yt = (yt * st).sum(axis=-1)
+            y.append(yt)
 
         y = mx.stack(y, axis=0)
         return y.reshape(orig_shape)
 
 
+class DecoderLayer(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.ffn = DistributedMoeBlock(args)
+        self.norm_attn_norm = NormAttnNorm(args)
+
+    async def __call__(
+        self,
+        x: mx.array,
+        shard: MoeShard,
+        buffer: dict,
+        sync_complete: asyncio.Event,
+        mask: Optional[mx.array] = None,
+        cache: Optional[Tuple[mx.array, mx.array]] = None,
+    ) -> mx.array:
+        r, h, cache = self.norm_attn_norm(x, mask, cache)
+        out = (await self.ffn(h, shard, buffer, sync_complete)) + r
+        return out, cache
+
+
+class DBRX(nn.Module):
+    def __init__(self, args: ModelArgs, experts: mx.array):
+        super().__init__()
+        self.vocab_size = args.vocab_size
+        self.wte = nn.Embedding(args.vocab_size, args.d_model)
+        self.blocks = [DecoderLayer(args) for _ in range(args.n_layers)]
+        self.moe_shard = MoeShard(args.ffn_config["shard_url"], experts)
+        self.buffer = {}
+        self.sync_complete = asyncio.Event()
+        self.norm_f = nn.LayerNorm(args.d_model, bias=False)
+        self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
+
+    def reset_buffer_mechanism(self):
+        self.buffer = {}
+        self.sync_complete.clear()
+
+    async def __call__(
+        self,
+        inputs: mx.array,
+        cache=None,
+    ):
+        h = self.wte(inputs)
+
+        mask = None
+        T = h.shape[1]
+        if T > 1:
+            mask = nn.MultiHeadAttention.create_additive_causal_mask(T)
+            mask = mask.astype(h.dtype)
+
+        if cache is None:
+            cache = [None] * len(self.blocks)
+
+        self.moe_shard.reset_expert_generators()
+        for e, layer in enumerate(self.blocks):
+            h, cache[e] = await layer(
+                h, self.moe_shard, self.buffer, self.sync_complete, mask, cache[e]
+            )
+            self.reset_buffer_mechanism()
+
+        return self.lm_head(self.norm_f(h)), cache
+
+
 class ShardServicer(shard_pb2_grpc.ShardServicer):
 
     def __init__(self, model_path: str, config_filename: str) -> None:
+        mx.random.seed(DEFAULT_SEED)
         self.model_path = Path(model_path)
         self.model_args = self.get_model_args(config_filename)
         self.model = self.load_model()
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_path, trust_remote_code=True
+        )
+        self.other_shards = None
 
-    def Receive(self, request: shard_pb2.ExpertOuts, context):
-        bytes_to_mx(request.data)
-        return shard_pb2.Empty()
-
-    def get_model_args(self, config_filename: str) -> dict:
+    def get_model_args(self, config_filename: str) -> ModelArgs:
         try:
             with open(self.model_path / config_filename, "r") as f:
-                return json.load(f)
+                config = json.load(f)
         except FileNotFoundError:
             logging.error(f"{config_filename} not found in {self.model_path}")
             raise
 
-    def load_model(self):
+        model_args = ModelArgs.from_dict(config)
+        model_args.ffn_config["expert_map"] = {}
+
+        for url, assigned_experts in model_args.ffn_config["shard_map"].items():
+            for e in assigned_experts:
+                model_args.ffn_config["expert_map"][e] = url
+
+        return model_args
+
+    def load_model(self) -> DBRX:
         # sample:
         # {0: {"weights": mx.array([0, 1, 2, 3])}}
         experts = {
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
-            for e in self.model_args["ffn_config"]["assigned_experts"]
+            for e in self.model_args.ffn_config["assigned_experts"]
         }
         mx.eval(experts)
 
-        return DistributedDBRX(experts)
+        model = DBRX(self.model_args, experts)
+        non_expert_weights = mx.load(str(self.model_path / f"non-expert.safetensors"))
+        model.load_weights(list(non_expert_weights.items()))
+        mx.eval(model.parameters())
+        model.eval()
+
+        return model
+
+    def reset(self):
+        self.other_shards = None
+
+    async def generate_step(
+        self,
+        model: nn.Module,
+        prompt: mx.array,
+        temp: float,
+    ) -> AsyncGenerator[Tuple[mx.array, mx.array]]:
+
+        def sample(logits: mx.array) -> Tuple[mx.array, float]:
+            softmax_logits = mx.softmax(logits)
+
+            if temp == 0:
+                token = mx.argmax(logits, axis=-1)
+            else:
+                token = mx.random.categorical(logits * (1 / temp))
+
+            prob = softmax_logits[0, token]
+            return token, prob
+
+        y = prompt
+        cache = None
+
+        while True:
+            logits, cache = await model(y[None], cache=cache)
+            logits = logits[:, -1, :]
+            y, prob = sample(logits)
+            yield y, prob
+
+    async def generate(
+        self,
+        model: nn.Module,
+        tokenizer: PreTrainedTokenizer,
+        prompt: str,
+        max_tokens: int,
+        temp: float,
+    ) -> shard_pb2.Outputs:
+        prompt_tokens = mx.array(tokenizer.encode(prompt))
+
+        tic = time.perf_counter()
+        tokens = []
+        token_strings = []
+        REPLACEMENT_CHAR = "\ufffd"
+
+        n = 0
+        async for token, prob in self.generate_step(
+            model,
+            prompt_tokens,
+            temp,
+        ):
+            if n >= max_tokens:
+                break
+
+            token = token.item()  # get word ID
+            if n == 0:
+                prompt_time = time.perf_counter() - tic
+                tic = time.perf_counter()
+            if token == tokenizer.eos_token_id:
+                n += 1
+                break
+            tokens.append(token)
+
+            s = tokenizer.decode(tokens)  # str
+            # Reset token cache at line break
+            if s[-1] == "\n":
+                tokens = []
+                token_strings.append(s)
+
+            n += 1
+
+        token_strings.append(tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, ""))
+        gen_time = time.perf_counter() - tic
+
+        return shard_pb2.Outputs(
+            prompt_time=prompt_time,
+            prompt_t_cnt=prompt_tokens.size,
+            gen_time=gen_time,
+            gen_t_cnt=n - 1,
+            response="".join(token_strings),
+        )
+
+    async def Start(self, request: shard_pb2.Inputs, context) -> None:
+        async with AsyncExitStack() as es:
+            self.other_shards = []
+
+            for url in self.model_args.ffn_config["shard_map"]:
+                if url == self.model_args.ffn_config["shard_url"]:
+                    continue
+                channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
+                shard = shard_pb2_grpc.ShardStub(channel)
+                self.other_shards.append(shard)
+
+            self.model.moe_shard.other_shards = self.other_shards
+            response = await self.generate(
+                self.model,
+                self.tokenizer,
+                request.prompt,
+                request.max_tokens,
+                DEFAULT_TEMP,
+            )
+
+        return shard_pb2.Outputs(response=response)
+
+    def Receive(self, request: shard_pb2.ShardOuts, context):
+        self.model.buffer[request.url] = {
+            "expert_outs": bytes_to_mx(request.data),
+            "arr_map": pickle.loads(request.arr_map),
+        }
+
+        if len(self.model.buffer) == len(self.other_shards):
+            self.model.sync_complete.set()
+
+        return shard_pb2.Empty()
 
 
-def serve(port: int, model_path: str, config_filename: str):
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+async def serve(port: int, model_path: str, config_filename: str):
+    server = grpc.aio.server()
     shard_pb2_grpc.add_ShardServicer_to_server(
         ShardServicer(model_path, config_filename), server
     )
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
-    server.start()
+    await server.start()
     logging.info(f"server started, listening on {listen_addr}")
-    server.wait_for_termination()
+
+    # copied from:
+    # https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
+    async def server_graceful_shutdown():
+        logging.info("Starting graceful shutdown...")
+        # Shuts down the server with 3 seconds of grace period. During the
+        # grace period, the server won't accept new connections and allow
+        # existing RPCs to continue within the grace period.
+        await server.stop(3)
+
+    _cleanup_coroutines.append(server_graceful_shutdown())
+    await server.wait_for_termination()
 
 
 if __name__ == "__main__":
@@ -351,4 +528,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    serve(args.port, args.model_path, args.config_filename)
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(serve(args.port, args.model_path, args.config_filename))
+    finally:
+        loop.run_until_complete(*_cleanup_coroutines)
+        loop.close()
