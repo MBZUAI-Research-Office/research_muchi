@@ -250,7 +250,7 @@ class DistributedMoeBlock(nn.Module):
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs = self.design_jobs(inds)
+        jobs = self.design_jobs(inds, shard.url)
 
         await shard(x, jobs)
         await sync_complete.wait()
