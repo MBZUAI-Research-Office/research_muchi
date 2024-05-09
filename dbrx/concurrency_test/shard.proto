@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+service Shard {
+  rpc Receive (ShardOuts) returns (Empty) {}
+  rpc StartTest (Empty) returns (Empty) {}
+}
+
+message ShardOuts {
+  string url = 1;
+  bytes data = 2;
+  bytes arr_map = 3;
+}
+
+message Empty {}
