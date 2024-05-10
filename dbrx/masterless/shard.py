@@ -184,6 +184,11 @@ class MoeShard:
         # job[1] indicates num additional calculations needed to avoid
         # wire memory driver activity from surfacing
 
+        def mlp(x, v1, w1, w2):
+            y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
+            mx.eval(y)
+            return y
+
         expert_outs = []
         arr_map = {}
 
@@ -191,20 +196,27 @@ class MoeShard:
             v1, w1, w2 = next(self.experts[e]["generator"])
             for i, x in enumerate(inputs):
                 if e in jobs[i][0]:
-                    y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
-                    mx.eval(y)
-                    expert_outs.append(y)
+                    expert_outs.append(mlp(x, v1, w1, w2))
                     arr_map[f"{i}.{e}"] = len(expert_outs) - 1
                 elif jobs[i][1] > 0:
-                    mx.eval((self.act_fn(x @ w1) * (x @ v1)) @ w2)
+                    mlp(x, v1, w1, w2)
                     jobs[i][1] -= 1
 
-        arr_bytes = mx_to_bytes(mx.stack(expert_outs, axis=0))
+        # bc cannot serialize an empty array
+        if len(expert_outs) == 0:
+            expert_outs.append(mx.array([False]))
+
+        expert_outs = mx.stack(expert_outs, axis=0)
+        mx.eval(expert_outs)
+
+        arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
         async with asyncio.TaskGroup() as tg:
             for shard in self.other_shards:
                 tg.create_task(self.send(shard, arr_bytes, arr_map_bytes))
+
+        return expert_outs, arr_map
 
 
 class DistributedMoeBlock(nn.Module):
@@ -252,8 +264,10 @@ class DistributedMoeBlock(nn.Module):
         inds = inds.tolist()
         jobs = self.design_jobs(inds, shard.url)
 
-        await shard(x, jobs)
+        expert_outs, arr_map = await shard(x, jobs)
         await sync_complete.wait()
+        # here bc other shards could have filled the buffer before this shard finishes
+        buffer[shard.url] = {"expert_outs": expert_outs, "arr_map": arr_map}
 
         y = []
 
