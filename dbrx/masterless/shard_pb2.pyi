@@ -27,14 +27,16 @@ class Outputs(_message.Message):
     def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., response: _Optional[str] = ...) -> None: ...
 
 class ShardOuts(_message.Message):
-    __slots__ = ("url", "data", "arr_map")
+    __slots__ = ("url", "block_num", "data", "arr_map")
     URL_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_NUM_FIELD_NUMBER: _ClassVar[int]
     DATA_FIELD_NUMBER: _ClassVar[int]
     ARR_MAP_FIELD_NUMBER: _ClassVar[int]
     url: str
+    block_num: int
     data: bytes
     arr_map: bytes
-    def __init__(self, url: _Optional[str] = ..., data: _Optional[bytes] = ..., arr_map: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, url: _Optional[str] = ..., block_num: _Optional[int] = ..., data: _Optional[bytes] = ..., arr_map: _Optional[bytes] = ...) -> None: ...
 
 class Empty(_message.Message):
     __slots__ = ()

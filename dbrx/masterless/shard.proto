@@ -20,8 +20,9 @@ message Outputs {
 
 message ShardOuts {
   string url = 1;
-  bytes data = 2;
-  bytes arr_map = 3;
+  int32 block_num = 2;
+  bytes data = 3;
+  bytes arr_map = 4;
 }
 
 message Empty {}

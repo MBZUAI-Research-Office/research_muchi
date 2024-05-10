@@ -170,13 +170,19 @@ class MoeShard:
             self.experts[e]["generator"] = self.get_expert_generator(e)
 
     async def send(
-        self, shard: shard_pb2_grpc.ShardStub, arr_bytes: bytes, arr_map_bytes: bytes
+        self,
+        shard: shard_pb2_grpc.ShardStub,
+        block_num: int,
+        arr_bytes: bytes,
+        arr_map_bytes: bytes,
     ):
         await shard.Receive(
-            shard_pb2.ShardOuts(url=self.url, data=arr_bytes, arr_map=arr_map_bytes)
+            shard_pb2.ShardOuts(
+                url=self.url, block_num=block_num, data=arr_bytes, arr_map=arr_map_bytes
+            )
         )
 
-    async def __call__(self, inputs: mx.array, jobs: list) -> None:
+    async def __call__(self, inputs: mx.array, jobs: list, block_num: int) -> None:
         # sample jobs:
         # [[{14}, 1], [{}, 2]]
         # for each job,
@@ -208,15 +214,13 @@ class MoeShard:
 
         expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
-        print(expert_outs.shape)
-        print(arr_map)
 
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
         async with asyncio.TaskGroup() as tg:
             for shard in self.other_shards:
-                tg.create_task(self.send(shard, arr_bytes, arr_map_bytes))
+                tg.create_task(self.send(shard, block_num, arr_bytes, arr_map_bytes))
 
         return expert_outs, arr_map
 
@@ -248,7 +252,12 @@ class DistributedMoeBlock(nn.Module):
         return jobs
 
     async def __call__(
-        self, x: mx.array, shard: MoeShard, buffer: dict, sync_complete: asyncio.Event
+        self,
+        x: mx.array,
+        shard: MoeShard,
+        block_num: int,
+        buffer: dict,
+        sync_complete: asyncio.Event,
     ) -> mx.array:
         ne = self.num_experts_per_tok
         orig_shape = x.shape
@@ -266,7 +275,7 @@ class DistributedMoeBlock(nn.Module):
         inds = inds.tolist()
         jobs = self.design_jobs(inds, shard.url)
 
-        expert_outs, arr_map = await shard(x, jobs)
+        expert_outs, arr_map = await shard(x, jobs, block_num)
         await sync_complete.wait()
         # here bc other shards could have filled the buffer before this shard finishes
         buffer[shard.url] = {"expert_outs": expert_outs, "arr_map": arr_map}
@@ -290,22 +299,27 @@ class DistributedMoeBlock(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, block_num: int):
         super().__init__()
         self.ffn = DistributedMoeBlock(args)
         self.norm_attn_norm = NormAttnNorm(args)
+        self.block_num = block_num
+        self.buffer = {}
+        self.sync_complete = asyncio.Event()
+
+    def reset_buffer_mechanism(self):
+        self.buffer = {}
+        self.sync_complete.clear()
 
     async def __call__(
         self,
         x: mx.array,
         shard: MoeShard,
-        buffer: dict,
-        sync_complete: asyncio.Event,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
         r, h, cache = self.norm_attn_norm(x, mask, cache)
-        out = (await self.ffn(h, shard, buffer, sync_complete)) + r
+        out = (await self.ffn(h, shard, self.buffer, self.sync_complete)) + r
         return out, cache
 
 
@@ -314,16 +328,14 @@ class DBRX(nn.Module):
         super().__init__()
         self.vocab_size = args.vocab_size
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
-        self.blocks = [DecoderLayer(args) for _ in range(args.n_layers)]
+        self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.moe_shard = MoeShard(args.ffn_config["shard_url"], experts)
-        self.buffer = {}
-        self.sync_complete = asyncio.Event()
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
         self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
 
-    def reset_buffer_mechanism(self):
-        self.buffer = {}
-        self.sync_complete.clear()
+    def reset_blocks(self):
+        for block in self.blocks:
+            block.reset_buffer_mechanism()
 
     async def __call__(
         self,
@@ -341,12 +353,11 @@ class DBRX(nn.Module):
         if cache is None:
             cache = [None] * len(self.blocks)
 
+        self.reset_blocks()
         self.moe_shard.reset_expert_generators()
+
         for e, layer in enumerate(self.blocks):
-            h, cache[e] = await layer(
-                h, self.moe_shard, self.buffer, self.sync_complete, mask, cache[e]
-            )
-            self.reset_buffer_mechanism()
+            h, cache[e] = await layer(h, self.moe_shard, mask, cache[e])
 
         return self.lm_head(self.norm_f(h)), cache
 
@@ -502,13 +513,14 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         return shard_pb2.Outputs(response=response)
 
     def Receive(self, request: shard_pb2.ShardOuts, context):
-        self.model.buffer[request.url] = {
+        block = self.model.blocks[request.block_num]
+        block.buffer[request.url] = {
             "expert_outs": bytes_to_mx(request.data),
             "arr_map": pickle.loads(request.arr_map),
         }
 
-        if len(self.model.buffer) == len(self.other_shards):
-            self.model.sync_complete.set()
+        if len(block.buffer) == len(self.other_shards):
+            block.sync_complete.set()
 
         return shard_pb2.Empty()
 

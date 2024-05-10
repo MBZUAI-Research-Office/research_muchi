@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bshard.proto\",\n\x06Inputs\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\x12\n\nmax_tokens\x18\x02 \x01(\x05\"k\n\x07Outputs\x12\x13\n\x0bprompt_time\x18\x01 \x01(\x01\x12\x14\n\x0cprompt_t_cnt\x18\x02 \x01(\x05\x12\x10\n\x08gen_time\x18\x03 \x01(\x01\x12\x11\n\tgen_t_cnt\x18\x04 \x01(\x05\x12\x10\n\x08response\x18\x05 \x01(\t\"7\n\tShardOuts\x12\x0b\n\x03url\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x0f\n\x07\x61rr_map\x18\x03 \x01(\x0c\"\x07\n\x05\x45mpty2F\n\x05Shard\x12\x1c\n\x05Start\x12\x07.Inputs\x1a\x08.Outputs\"\x00\x12\x1f\n\x07Receive\x12\n.ShardOuts\x1a\x06.Empty\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bshard.proto\",\n\x06Inputs\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\x12\n\nmax_tokens\x18\x02 \x01(\x05\"k\n\x07Outputs\x12\x13\n\x0bprompt_time\x18\x01 \x01(\x01\x12\x14\n\x0cprompt_t_cnt\x18\x02 \x01(\x05\x12\x10\n\x08gen_time\x18\x03 \x01(\x01\x12\x11\n\tgen_t_cnt\x18\x04 \x01(\x05\x12\x10\n\x08response\x18\x05 \x01(\t\"J\n\tShardOuts\x12\x0b\n\x03url\x18\x01 \x01(\t\x12\x11\n\tblock_num\x18\x02 \x01(\x05\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x0f\n\x07\x61rr_map\x18\x04 \x01(\x0c\"\x07\n\x05\x45mpty2F\n\x05Shard\x12\x1c\n\x05Start\x12\x07.Inputs\x1a\x08.Outputs\"\x00\x12\x1f\n\x07Receive\x12\n.ShardOuts\x1a\x06.Empty\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -26,9 +26,9 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['_OUTPUTS']._serialized_start=61
   _globals['_OUTPUTS']._serialized_end=168
   _globals['_SHARDOUTS']._serialized_start=170
-  _globals['_SHARDOUTS']._serialized_end=225
-  _globals['_EMPTY']._serialized_start=227
-  _globals['_EMPTY']._serialized_end=234
-  _globals['_SHARD']._serialized_start=236
-  _globals['_SHARD']._serialized_end=306
+  _globals['_SHARDOUTS']._serialized_end=244
+  _globals['_EMPTY']._serialized_start=246
+  _globals['_EMPTY']._serialized_end=253
+  _globals['_SHARD']._serialized_start=255
+  _globals['_SHARD']._serialized_end=325
 # @@protoc_insertion_point(module_scope)
