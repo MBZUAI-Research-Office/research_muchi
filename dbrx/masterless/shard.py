@@ -208,6 +208,8 @@ class MoeShard:
 
         expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
+        print(expert_outs.shape)
+        print(arr_map)
 
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
@@ -275,7 +277,6 @@ class DistributedMoeBlock(nn.Module):
             yt = []
             for e in it:
                 url = self.expert_map[e]
-                print(buffer[url])
                 expert_outs = buffer[url]["expert_outs"]
                 eoi = buffer[url]["arr_map"][f"{bi}.{e}"]
                 yt.append(expert_outs[eoi])
