@@ -492,7 +492,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         async with AsyncExitStack() as es:
             self.other_shards = []
 
-            for url in self.model_args.ffn_config["shard_map"]:
+            for url in self.model_args.ffn_config["other_shards"]:
                 if url == self.model_args.ffn_config["shard_url"]:
                     continue
                 channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
@@ -508,7 +508,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
                 DEFAULT_TEMP,
             )
 
-        return shard_pb2.Outputs(response=response)
+        return response
 
     def Receive(self, request: shard_pb2.ShardOuts, context):
         block = self.model.blocks[request.block_num]
