@@ -15,7 +15,12 @@ async def StartTest(shard: shard_pb2_grpc.ShardStub):
 async def test0():
     async with AsyncExitStack() as es:
         shards = []
-        for url in ["192.168.1.6:6000", "192.168.1.6:6001", "192.168.1.6:6002"]:
+        for url in [
+            "192.168.1.2:2000",
+            "192.168.1.4:4000",
+            "192.168.1.5:5000",
+            "192.168.1.6:6000",
+        ]:
             channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
             shard = shard_pb2_grpc.ShardStub(channel)
             shards.append(shard)
