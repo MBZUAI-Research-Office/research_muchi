@@ -319,8 +319,8 @@ class DecoderLayer(nn.Module):
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
         r, h, cache = self.norm_attn_norm(x, mask, cache)
-        out = (await self.ffn(h, shard, self.buffer, self.sync_complete)) + r
-        return out, cache
+        h = await self.ffn(h, shard, self.block_num, self.buffer, self.sync_complete)
+        return h + r, cache
 
 
 class DBRX(nn.Module):
