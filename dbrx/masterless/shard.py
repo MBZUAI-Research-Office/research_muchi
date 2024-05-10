@@ -275,6 +275,7 @@ class DistributedMoeBlock(nn.Module):
             yt = []
             for e in it:
                 url = self.expert_map[e]
+                print(buffer[url])
                 expert_outs = buffer[url]["expert_outs"]
                 eoi = buffer[url]["arr_map"][f"{bi}.{e}"]
                 yt.append(expert_outs[eoi])
