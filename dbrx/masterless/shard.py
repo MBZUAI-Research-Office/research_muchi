@@ -1,7 +1,6 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
 from collections.abc import AsyncGenerator
-from concurrent import futures
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,9 +217,13 @@ class MoeShard:
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
+        tic = time.perf_counter()
+
         async with asyncio.TaskGroup() as tg:
             for shard in self.other_shards:
                 tg.create_task(self.send(shard, block_num, arr_bytes, arr_map_bytes))
+
+        print(f"communication took: {time.perf_counter() - tic} sec(s)", flush=True)
 
         return expert_outs, arr_map
 
@@ -333,10 +336,6 @@ class DBRX(nn.Module):
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
         self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
 
-    def reset_blocks(self):
-        for block in self.blocks:
-            block.reset_buffer_mechanism()
-
     async def __call__(
         self,
         inputs: mx.array,
@@ -353,11 +352,10 @@ class DBRX(nn.Module):
         if cache is None:
             cache = [None] * len(self.blocks)
 
-        self.reset_blocks()
         self.moe_shard.reset_expert_generators()
-
         for e, layer in enumerate(self.blocks):
             h, cache[e] = await layer(h, self.moe_shard, mask, cache[e])
+            layer.reset_buffer_mechanism()
 
         return self.lm_head(self.norm_f(h)), cache
 
