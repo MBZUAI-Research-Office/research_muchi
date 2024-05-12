@@ -18,7 +18,7 @@ def mx_to_bytes(arr: mx.array) -> bytes:
     # convert mx.array to bytes
     arr_bytes = None
     with io.BytesIO() as buffer:
-        mx.save(buffer, arr=arr.astype(mx.float32))
+        mx.save(buffer, arr=arr)
         arr_bytes = buffer.getvalue()
     assert arr_bytes is not None
     return arr_bytes
@@ -31,7 +31,7 @@ def bytes_to_mx(a_bytes: bytes) -> mx.array:
         buffer.name = "xxx.npy"  # hack!
         arr = mx.load(buffer)
     assert arr is not None
-    return arr.astype(mx.bfloat16)
+    return arr
 
 
 # def test_0():

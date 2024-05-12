@@ -130,8 +130,8 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
                     grpc.aio.insecure_channel(
                         url,
                         options=[
-                            ("grpc.max_send_message_length", 9999999),
-                            ("grpc.max_receive_message_length", 9999999),
+                            ("grpc.max_send_message_length", -1),
+                            ("grpc.max_receive_message_length", -1),
                         ],
                     )
                 )
@@ -147,8 +147,8 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 async def serve(ip: str, port: int):
     server = grpc.aio.server(
         options=[
-            ("grpc.max_send_message_length", 9999999),
-            ("grpc.max_receive_message_length", 9999999),
+            ("grpc.max_send_message_length", -1),
+            ("grpc.max_receive_message_length", -1),
         ]
     )
     shard_pb2_grpc.add_ShardServicer_to_server(ShardServicer(f"{ip}:{port}"), server)

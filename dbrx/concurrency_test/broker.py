@@ -30,8 +30,8 @@ async def test0(n_layers: int, delay: int, batch_size: int):
                 grpc.aio.insecure_channel(
                     url,
                     options=[
-                        ("grpc.max_send_message_length", 9999999),
-                        ("grpc.max_receive_message_length", 9999999),
+                        ("grpc.max_send_message_length", -1),
+                        ("grpc.max_receive_message_length", -1),
                     ],
                 )
             )
