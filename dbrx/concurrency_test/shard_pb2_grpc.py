@@ -21,7 +21,7 @@ class ShardStub(object):
                 )
         self.StartTest = channel.unary_unary(
                 '/Shard/StartTest',
-                request_serializer=shard__pb2.Empty.SerializeToString,
+                request_serializer=shard__pb2.Inputs.SerializeToString,
                 response_deserializer=shard__pb2.Empty.FromString,
                 )
 
@@ -51,7 +51,7 @@ def add_ShardServicer_to_server(servicer, server):
             ),
             'StartTest': grpc.unary_unary_rpc_method_handler(
                     servicer.StartTest,
-                    request_deserializer=shard__pb2.Empty.FromString,
+                    request_deserializer=shard__pb2.Inputs.FromString,
                     response_serializer=shard__pb2.Empty.SerializeToString,
             ),
     }
@@ -93,7 +93,7 @@ class Shard(object):
             timeout=None,
             metadata=None):
         return grpc.experimental.unary_unary(request, target, '/Shard/StartTest',
-            shard__pb2.Empty.SerializeToString,
+            shard__pb2.Inputs.SerializeToString,
             shard__pb2.Empty.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

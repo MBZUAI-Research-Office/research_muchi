@@ -1,6 +1,7 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
 from contextlib import AsyncExitStack
+from statistics import mean
 import argparse
 import asyncio
 import logging
@@ -53,11 +54,11 @@ class Layer:
             )
         )
 
-    async def calc(self, delay: int) -> None:
+    async def calc(self, delay: int, batch_size: int) -> tuple:
         if delay > 0:
             await asyncio.sleep(delay)
 
-        a_bytes = mx_to_bytes(mx.random.uniform(-1, 1, (1, 6144), dtype=mx.bfloat16))
+        a_bytes = mx_to_bytes(mx.ones((batch_size, 6144), dtype=mx.bfloat16))
         am_bytes = pickle.dumps({})
 
         tic = time.perf_counter()
@@ -66,35 +67,44 @@ class Layer:
             for shard in self.other_shards:
                 tg.create_task(self.send(shard, a_bytes, am_bytes))
 
-        print(f"comm took {time.perf_counter() - tic} sec(s)")
+        comm_latency = time.perf_counter() - tic
         tic = time.perf_counter()
 
         await self.sync_complete.wait()
 
-        print(f"syncing took {time.perf_counter() - tic} sec(s)")
+        sync_latency = time.perf_counter() - tic
 
-        agg = mx.concatenate([d["expert_outs"] for d in self.buffer.values()], axis=0)
-        mx.eval(agg)
+        # agg = mx.concatenate([d["expert_outs"] for d in self.buffer.values()], axis=0)
+        # mx.eval(agg)
+
+        return comm_latency, sync_latency
 
 
 class Model:
 
-    def __init__(self, url: str, other_shards: list, n_layers: int, delay: int) -> None:
-        self.delay = delay
+    def __init__(self, url: str, other_shards: list, n_layers: int) -> None:
+        self.n_layers = n_layers
         self.layers = [Layer(url, other_shards, i) for i in range(n_layers)]
 
-    async def start(self):
+    async def start(self, delay: int, batch_size: int):
+        comm_latencies = []
+        sync_latencies = []
+
         for layer in self.layers:
-            await layer.calc(self.delay)
+            comm_latency, sync_latency = await layer.calc(delay, batch_size)
             layer.reset()
+
+            comm_latencies.append(comm_latency)
+            sync_latencies.append(sync_latency)
+
+        print(f"avg comm latency over {self.n_layers} layers: {mean(comm_latencies)}")
+        print(f"avg sync latency over {self.n_layers} layers: {mean(sync_latencies)}")
 
 
 class ShardServicer(shard_pb2_grpc.ShardServicer):
 
-    def __init__(self, url: str, n_layers: int, delay: int) -> None:
+    def __init__(self, url: str) -> None:
         self.url = url
-        self.n_layers = n_layers
-        self.delay = delay
         self.model = None
 
     def Receive(self, request: shard_pb2.ShardOuts, context):
@@ -109,7 +119,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
         return shard_pb2.Empty()
 
-    async def StartTest(self, request, context):
+    async def StartTest(self, request: shard_pb2.Inputs, context):
         async with AsyncExitStack() as es:
             other_shards = []
             for url in SHARDS:
@@ -120,8 +130,8 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
                 shard = shard_pb2_grpc.ShardStub(channel)
                 other_shards.append(shard)
 
-            self.model = Model(self.url, other_shards, self.n_layers, self.delay)
-            await self.model.start()
+            self.model = Model(self.url, other_shards, request.n_layers)
+            await self.model.start(request.delay, request.batch_size)
 
         return shard_pb2.Empty()
 
@@ -153,14 +163,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ip", type=str)
     parser.add_argument("--port", type=int)
-    parser.add_argument("--n-layers", type=int)
-    parser.add_argument("--delay", type=int)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
     loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(serve(args.ip, args.port, args.n_layers, args.delay))
+        loop.run_until_complete(serve(args.ip, args.port))
     finally:
         loop.run_until_complete(*_cleanup_coroutines)
         loop.close()

@@ -16,6 +16,16 @@ class ShardOuts(_message.Message):
     arr_map: bytes
     def __init__(self, url: _Optional[str] = ..., block_num: _Optional[int] = ..., data: _Optional[bytes] = ..., arr_map: _Optional[bytes] = ...) -> None: ...
 
+class Inputs(_message.Message):
+    __slots__ = ("n_layers", "delay", "batch_size")
+    N_LAYERS_FIELD_NUMBER: _ClassVar[int]
+    DELAY_FIELD_NUMBER: _ClassVar[int]
+    BATCH_SIZE_FIELD_NUMBER: _ClassVar[int]
+    n_layers: int
+    delay: int
+    batch_size: int
+    def __init__(self, n_layers: _Optional[int] = ..., delay: _Optional[int] = ..., batch_size: _Optional[int] = ...) -> None: ...
+
 class Empty(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...

@@ -1,6 +1,7 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
 from contextlib import AsyncExitStack
+import argparse
 import asyncio
 
 import grpc
@@ -8,11 +9,15 @@ import shard_pb2
 import shard_pb2_grpc
 
 
-async def StartTest(shard: shard_pb2_grpc.ShardStub):
-    await shard.StartTest(shard_pb2.Empty())
+async def StartTest(
+    shard: shard_pb2_grpc.ShardStub, n_layers: int, delay: int, batch_size: int
+):
+    await shard.StartTest(
+        shard_pb2.Inputs(n_layers=n_layers, delay=delay, batch_size=batch_size)
+    )
 
 
-async def test0():
+async def test0(n_layers: int, delay: int, batch_size: int):
     async with AsyncExitStack() as es:
         shards = []
         for url in [
@@ -27,10 +32,16 @@ async def test0():
 
         async with asyncio.TaskGroup() as tg:
             for shard in shards:
-                tg.create_task(StartTest(shard))
+                tg.create_task(StartTest(shard, n_layers, delay, batch_size))
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n-layers", type=int)
+    parser.add_argument("--delay", type=int)
+    parser.add_argument("--batch_size", type=int)
+    args = parser.parse_args()
+
     print("test started")
-    asyncio.run(test0())
+    asyncio.run(test0(args.n_layers, args.delay, args.batch_size))
     print("test finished")
