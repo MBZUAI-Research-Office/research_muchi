@@ -136,10 +136,10 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         return shard_pb2.Empty()
 
 
-async def serve(ip: str, port: int, n_layers: int, delay: int):
+async def serve(ip: str, port: int):
     server = grpc.aio.server()
     shard_pb2_grpc.add_ShardServicer_to_server(
-        ShardServicer(f"{ip}:{port}", n_layers, delay), server
+        ShardServicer(f"{ip}:{port}"), server
     )
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
