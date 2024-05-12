@@ -126,7 +126,15 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
                 if url == self.url:
                     continue
                 print(url)
-                channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
+                channel = await es.enter_async_context(
+                    grpc.aio.insecure_channel(
+                        url,
+                        options=[
+                            ("grpc.max_send_message_length", -1),
+                            ("grpc.max_receive_message_length", -1),
+                        ],
+                    )
+                )
                 shard = shard_pb2_grpc.ShardStub(channel)
                 other_shards.append(shard)
 
@@ -138,9 +146,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
 async def serve(ip: str, port: int):
     server = grpc.aio.server()
-    shard_pb2_grpc.add_ShardServicer_to_server(
-        ShardServicer(f"{ip}:{port}"), server
-    )
+    shard_pb2_grpc.add_ShardServicer_to_server(ShardServicer(f"{ip}:{port}"), server)
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
     await server.start()

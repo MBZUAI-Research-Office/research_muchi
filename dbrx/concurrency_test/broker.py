@@ -26,7 +26,15 @@ async def test0(n_layers: int, delay: int, batch_size: int):
             "192.168.1.5:5000",
             "192.168.1.6:6000",
         ]:
-            channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
+            channel = await es.enter_async_context(
+                grpc.aio.insecure_channel(
+                    url,
+                    options=[
+                        ("grpc.max_send_message_length", -1),
+                        ("grpc.max_receive_message_length", -1),
+                    ],
+                )
+            )
             shard = shard_pb2_grpc.ShardStub(channel)
             shards.append(shard)
 
@@ -39,7 +47,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--n-layers", type=int)
     parser.add_argument("--delay", type=int)
-    parser.add_argument("--batch_size", type=int)
+    parser.add_argument("--batch-size", type=int)
     args = parser.parse_args()
 
     print("test started")
