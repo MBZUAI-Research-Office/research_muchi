@@ -41,7 +41,15 @@ async def start(config_path: str, prompt: str, max_tokens: int) -> None:
     async with AsyncExitStack() as es:
         shards = []
         for url in shard_urls:
-            channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
+            channel = await es.enter_async_context(
+                grpc.aio.insecure_channel(
+                    url,
+                    options=[
+                        ("grpc.max_send_message_length", -1),
+                        ("grpc.max_receive_message_length", -1),
+                    ],
+                )
+            )
             shard = shard_pb2_grpc.ShardStub(channel)
             shards.append(shard)
 
@@ -61,11 +69,11 @@ async def start(config_path: str, prompt: str, max_tokens: int) -> None:
     print("PROMPT EVALUATION:")
     print(f"token count: {output.prompt_t_cnt}")
     print(f"total time in sec(s): {output.prompt_time:.3f}")
-    print(f"throughput: {(output.prompt_time / output.prompt_t_cnt):.3f} t/s")
+    print(f"throughput: {(output.prompt_t_cnt / output.prompt_time):.3f} t/s")
     print("TOKEN GENERATION:")
     print(f"token count: {output.gen_t_cnt}")
     print(f"total time in sec(s): {output.gen_time:.3f}")
-    print(f"throughput: {(output.gen_time / output.gen_t_cnt):.3f} t/s")
+    print(f"throughput: {(output.gen_t_cnt / output.gen_time):.3f} t/s")
 
 
 if __name__ == "__main__":

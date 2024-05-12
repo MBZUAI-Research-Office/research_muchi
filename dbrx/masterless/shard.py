@@ -189,10 +189,9 @@ class MoeShard:
         # job[1] indicates num additional calculations needed to avoid
         # wire memory driver activity from surfacing
 
-        def mlp(x, v1, w1, w2):
+        def mlp(x, v1, w1, w2, dst):
             y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
-            mx.eval(y)
-            return y
+            dst.append(y)
 
         expert_outs = []
         arr_map = {}
@@ -201,19 +200,13 @@ class MoeShard:
             v1, w1, w2 = next(self.experts[e]["generator"])
             for i, x in enumerate(inputs):
                 if e in jobs[i][0]:
-                    expert_outs.append(mlp(x, v1, w1, w2))
+                    mlp(x, v1, w1, w2, expert_outs)
                     arr_map[f"{i}.{e}"] = len(expert_outs) - 1
                 elif jobs[i][1] > 0:
-                    mlp(x, v1, w1, w2)
+                    mlp(x, v1, w1, w2, expert_outs)
                     jobs[i][1] -= 1
 
-        # bc cannot serialize an empty array
-        if len(expert_outs) == 0:
-            expert_outs.append(mx.array([False]))
-
         expert_outs = mx.stack(expert_outs, axis=0)
-        mx.eval(expert_outs)
-
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
@@ -370,7 +363,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path, trust_remote_code=True
         )
-        self.other_shards = None
+        self.num_other_shards = len(self.model_args.ffn_config["shard_map"]) - 1
 
     def get_model_args(self, config_filename: str) -> ModelArgs:
         try:
@@ -405,9 +398,6 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         model.eval()
 
         return model
-
-    def reset(self):
-        self.other_shards = None
 
     async def generate_step(
         self,
@@ -490,16 +480,24 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
     async def Start(self, request: shard_pb2.Inputs, context) -> None:
         async with AsyncExitStack() as es:
-            self.other_shards = []
+            other_shards = []
 
             for url in self.model_args.ffn_config["other_shards"]:
                 if url == self.model_args.ffn_config["shard_url"]:
                     continue
-                channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
+                channel = await es.enter_async_context(
+                    grpc.aio.insecure_channel(
+                        url,
+                        options=[
+                            ("grpc.max_send_message_length", -1),
+                            ("grpc.max_receive_message_length", -1),
+                        ],
+                    )
+                )
                 shard = shard_pb2_grpc.ShardStub(channel)
-                self.other_shards.append(shard)
+                other_shards.append(shard)
 
-            self.model.moe_shard.other_shards = self.other_shards
+            self.model.moe_shard.other_shards = other_shards
             response = await self.generate(
                 self.model,
                 self.tokenizer,
@@ -517,14 +515,19 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
             "arr_map": pickle.loads(request.arr_map),
         }
 
-        if len(block.buffer) == len(self.other_shards):
+        if len(block.buffer) == self.num_other_shards:
             block.sync_complete.set()
 
         return shard_pb2.Empty()
 
 
 async def serve(port: int, model_path: str, config_filename: str):
-    server = grpc.aio.server()
+    server = grpc.aio.server(
+        options=[
+            ("grpc.max_send_message_length", -1),
+            ("grpc.max_receive_message_length", -1),
+        ]
+    )
     shard_pb2_grpc.add_ShardServicer_to_server(
         ShardServicer(model_path, config_filename), server
     )
