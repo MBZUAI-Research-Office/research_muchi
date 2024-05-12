@@ -1,6 +1,5 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
-from concurrent import futures
 from contextlib import AsyncExitStack
 import argparse
 import asyncio
@@ -48,6 +47,7 @@ class Layer:
         await shard.Receive(
             shard_pb2.ShardOuts(
                 url=self.url,
+                block_num=self.block_num,
                 data=arr_bytes,
                 arr_map=arr_map_bytes,
             )
@@ -115,6 +115,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
             for url in SHARDS:
                 if url == self.url:
                     continue
+                print(url)
                 channel = await es.enter_async_context(grpc.aio.insecure_channel(url))
                 shard = shard_pb2_grpc.ShardStub(channel)
                 other_shards.append(shard)
@@ -127,8 +128,9 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
 async def serve(ip: str, port: int, n_layers: int, delay: int):
     server = grpc.aio.server()
-    servicer = ShardServicer(f"{ip}:{port}", n_layers, delay)
-    shard_pb2_grpc.add_ShardServicer_to_server(servicer, server)
+    shard_pb2_grpc.add_ShardServicer_to_server(
+        ShardServicer(f"{ip}:{port}", n_layers, delay), server
+    )
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
     await server.start()
