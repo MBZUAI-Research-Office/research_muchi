@@ -112,24 +112,25 @@ class MoeShard:
                     mlp(x, v1, w1, w2, expert_outs)
                     jobs[i][1] -= 1
 
-        print(f"started expert calculation at {time.time()}", flush=True)
+        print(f"started expert calc at {time.time():.3f}", flush=True)
         tic = time.perf_counter()
 
         expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
 
-        print(f"ended expert calculation at {time.time()}, took {time.perf_counter() - tic} sec(s)", flush=True)
+        print(f"ended expert calc at {time.time():.3f}, took {(time.perf_counter() - tic):.3f} sec(s)", flush=True)
 
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
+        print(f"started comm at {time.time():.3f}", flush=True)
         tic = time.perf_counter()
 
         async with asyncio.TaskGroup() as tg:
             for shard in self.other_shards:
                 tg.create_task(self.send(shard, block_num, arr_bytes, arr_map_bytes))
 
-        print(f"communication took: {time.perf_counter() - tic} sec(s)", flush=True)
+        print(f"ended comm at {time.time():.3f}, took: {(time.perf_counter() - tic):.3f} sec(s)", flush=True)
 
 
 class DistributedMoeBlock(nn.Module):
@@ -273,7 +274,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         return shard_pb2.Outputs()
 
     def Receive(self, request: shard_pb2.ShardOuts, context):
-        print(f"started receiving from {request.url} for {request.block_num} at {time.time()}", flush=True)
+        print(f"receiving from {request.url} for {request.block_num} at {time.time():.3f}", flush=True)
 
         block = self.model.blocks[request.block_num]
         block.buffer[request.url] = {
