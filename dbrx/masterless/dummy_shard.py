@@ -112,20 +112,17 @@ class MoeShard:
                     mlp(x, v1, w1, w2, expert_outs)
                     jobs[i][1] -= 1
 
-        print("started expert calculation", flush=True)
+        print(f"started expert calculation at {time.time()}", flush=True)
         tic = time.perf_counter()
 
         expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
 
-        print(f"expert calculation took {time.perf_counter() - tic}", flush=True)
-        print("started serialization", flush=True)
-        tic = time.perf_counter()
+        print(f"ended expert calculation at {time.time()}, took {time.perf_counter() - tic} sec(s)", flush=True)
 
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
-        print(f"serialization took {time.perf_counter() - tic}", flush=True)
         tic = time.perf_counter()
 
         async with asyncio.TaskGroup() as tg:
@@ -276,7 +273,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         return shard_pb2.Outputs()
 
     def Receive(self, request: shard_pb2.ShardOuts, context):
-        print(f"started receiving from {request.url} for {request.block_num}", flush=True)
+        print(f"started receiving from {request.url} for {request.block_num} at {time.time()}", flush=True)
 
         block = self.model.blocks[request.block_num]
         block.buffer[request.url] = {
