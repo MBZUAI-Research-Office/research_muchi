@@ -201,7 +201,7 @@ class DBRX(nn.Module):
         self.moe_shard = MoeShard(args.ffn_config["shard_url"])
 
     async def __call__(self):
-        batch_size = 10
+        batch_size = 200
         xs = mx.random.uniform(-1, 1, (batch_size, 6144), mx.bfloat16)
         # self.moe_shard.reset_expert_generators()
         for layer in self.blocks:
