@@ -188,11 +188,17 @@ class DecoderLayer(nn.Module):
 
 
 class DBRX(nn.Module):
-    def __init__(self, args: ModelArgs, experts: mx.array):
+    # def __init__(self, args: ModelArgs, experts: mx.array):
+    #     super().__init__()
+    #     self.rng = default_rng(seed=0)
+    #     self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
+    #     self.moe_shard = MoeShard(args.ffn_config["shard_url"], experts)
+
+    def __init__(self, args: ModelArgs):
         super().__init__()
         self.rng = default_rng(seed=0)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
-        self.moe_shard = MoeShard(args.ffn_config["shard_url"], experts)
+        self.moe_shard = MoeShard(args.ffn_config["shard_url"])
 
     async def __call__(self):
         batch_size = 10
