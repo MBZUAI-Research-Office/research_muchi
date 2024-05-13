@@ -228,11 +228,13 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         return model_args
 
     def load_model(self) -> DBRX:
+        url = self.model_args.ffn_config["shard_url"]
+        assigned_experts = self.model_args.ffn_config["shard_map"][url]
         # sample:
         # {0: {"weights": mx.array([0, 1, 2, 3])}}
         experts = {
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
-            for e in self.model_args.ffn_config["assigned_experts"]
+            for e in assigned_experts
         }
         mx.eval(experts)
 
