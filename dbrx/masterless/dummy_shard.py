@@ -197,7 +197,10 @@ class DBRX(nn.Module):
         xs = mx.random.uniform(-1, 1, (batch_size, 6144), mx.bfloat16)
         self.moe_shard.reset_expert_generators()
         for layer in self.blocks:
-            inds = self.rng.choice(16, size=4, replace=False)
+            inds = [
+                self.rng.choice(16, size=4, replace=False).tolist()
+                for _ in range(batch_size)
+            ]
             await layer(xs, self.moe_shard, inds)
             layer.reset_buffer_mechanism()
 
