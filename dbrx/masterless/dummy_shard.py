@@ -102,8 +102,6 @@ class MoeShard:
         expert_outs = []
         arr_map = {}
 
-        print("started expert calculation", flush=True)
-
         for e in self.experts:
             v1, w1, w2 = next(self.experts[e]["generator"])
             for i, x in enumerate(inputs):
@@ -116,6 +114,9 @@ class MoeShard:
 
         expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
+
+        print("started expert calculation", flush=True)
+
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
