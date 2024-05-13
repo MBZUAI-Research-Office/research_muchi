@@ -55,11 +55,11 @@ class MoeShard:
     def __init__(
         self,
         url: str,
-        # experts: dict,
+        experts: dict,
     ) -> None:
         self.url = url
         # self.other_shards = None  # set when inference call is made
-        # self.experts = experts
+        self.experts = experts
         # self.act_fn = nn.silu
 
     # def get_expert_generator(self, e: int):
@@ -188,20 +188,14 @@ class DecoderLayer(nn.Module):
 
 
 class DBRX(nn.Module):
-    # def __init__(self, args: ModelArgs, experts: mx.array):
-    #     super().__init__()
-    #     self.rng = default_rng(seed=0)
-    #     self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
-    #     self.moe_shard = MoeShard(args.ffn_config["shard_url"], experts)
-
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, experts: mx.array):
         super().__init__()
         self.rng = default_rng(seed=0)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
-        self.moe_shard = MoeShard(args.ffn_config["shard_url"])
+        self.moe_shard = MoeShard(args.ffn_config["shard_url"], experts)
 
     async def __call__(self):
-        batch_size = 200
+        batch_size = 10
         xs = mx.random.uniform(-1, 1, (batch_size, 6144), mx.bfloat16)
         # self.moe_shard.reset_expert_generators()
         for layer in self.blocks:
@@ -239,18 +233,17 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         return model_args
 
     def load_model(self) -> DBRX:
-        # url = self.model_args.ffn_config["shard_url"]
-        # assigned_experts = self.model_args.ffn_config["shard_map"][url]
-        # # sample:
-        # # {0: {"weights": mx.array([0, 1, 2, 3])}}
-        # experts = {
-        #     e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
-        #     for e in assigned_experts
-        # }
-        # mx.eval(experts)
+        url = self.model_args.ffn_config["shard_url"]
+        assigned_experts = self.model_args.ffn_config["shard_map"][url]
+        # sample:
+        # {0: {"weights": mx.array([0, 1, 2, 3])}}
+        experts = {
+            e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
+            for e in assigned_experts
+        }
+        mx.eval(experts)
 
-        # model = DBRX(self.model_args, experts)
-        model = DBRX(self.model_args)
+        model = DBRX(self.model_args, experts)
         model.eval()
 
         return model
