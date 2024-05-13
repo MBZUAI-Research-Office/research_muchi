@@ -72,9 +72,9 @@ class MoeShard:
     #         else:
     #             yield v1, w1, weight
 
-    # def reset_expert_generators(self):
-    #     for e in self.experts:
-    #         self.experts[e]["generator"] = self.get_expert_generator(e)
+    def reset_expert_generators(self):
+        for e in self.experts:
+            self.experts[e]["generator"] = self.get_expert_generator(e)
 
     async def send(
         self,
