@@ -72,9 +72,9 @@ class MoeShard:
     #         else:
     #             yield v1, w1, weight
 
-    def reset_expert_generators(self):
-        for e in self.experts:
-            self.experts[e]["generator"] = self.get_expert_generator(e)
+    # def reset_expert_generators(self):
+    #     for e in self.experts:
+    #         self.experts[e]["generator"] = self.get_expert_generator(e)
 
     async def send(
         self,
@@ -203,7 +203,7 @@ class DBRX(nn.Module):
     async def __call__(self):
         batch_size = 10
         xs = mx.random.uniform(-1, 1, (batch_size, 6144), mx.bfloat16)
-        self.moe_shard.reset_expert_generators()
+        # self.moe_shard.reset_expert_generators()
         for layer in self.blocks:
             inds = [
                 self.rng.choice(16, size=4, replace=False).tolist()
