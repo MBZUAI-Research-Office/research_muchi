@@ -207,6 +207,7 @@ class MoeShard:
                     jobs[i][1] -= 1
 
         expert_outs = mx.stack(expert_outs, axis=0)
+        mx.eval(expert_outs)
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
