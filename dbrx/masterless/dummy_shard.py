@@ -247,7 +247,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         async with AsyncExitStack() as es:
             other_shards = []
 
-            for url in self.model_args.ffn_config["other_shards"]:
+            for url in self.model_args.ffn_config["shard_map"]:
                 if url == self.model_args.ffn_config["shard_url"]:
                     continue
                 channel = await es.enter_async_context(
