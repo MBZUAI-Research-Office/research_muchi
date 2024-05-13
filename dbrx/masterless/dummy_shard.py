@@ -1,10 +1,8 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
-from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
 import argparse
 import asyncio
 import inspect
@@ -58,23 +56,23 @@ class MoeShard:
         experts: dict,
     ) -> None:
         self.url = url
-        # self.other_shards = None  # set when inference call is made
+        self.other_shards = None  # set when inference call is made
         self.experts = experts
-        # self.act_fn = nn.silu
+        self.act_fn = nn.silu
 
-    # def get_expert_generator(self, e: int):
-    #     v1, w1 = None, None
-    #     for i, weight in enumerate(self.experts[e]["weights"]):
-    #         if i % 3 == 0:
-    #             v1 = weight.T
-    #         elif i % 3 == 1:
-    #             w1 = weight.T
-    #         else:
-    #             yield v1, w1, weight
+    def get_expert_generator(self, e: int):
+        v1, w1 = None, None
+        for i, weight in enumerate(self.experts[e]["weights"]):
+            if i % 3 == 0:
+                v1 = weight.T
+            elif i % 3 == 1:
+                w1 = weight.T
+            else:
+                yield v1, w1, weight
 
-    # def reset_expert_generators(self):
-    #     for e in self.experts:
-    #         self.experts[e]["generator"] = self.get_expert_generator(e)
+    def reset_expert_generators(self):
+        for e in self.experts:
+            self.experts[e]["generator"] = self.get_expert_generator(e)
 
     async def send(
         self,
@@ -97,31 +95,31 @@ class MoeShard:
         # job[1] indicates num additional calculations needed to avoid
         # wire memory driver activity from surfacing
 
-        # def mlp(x, v1, w1, w2, dst):
-        #     y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
-        #     dst.append(y)
+        def mlp(x, v1, w1, w2, dst):
+            y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
+            dst.append(y)
 
-        # expert_outs = []
-        # arr_map = {}
+        expert_outs = []
+        arr_map = {}
 
-        # for e in self.experts:
-        #     v1, w1, w2 = next(self.experts[e]["generator"])
-        #     for i, x in enumerate(inputs):
-        #         if e in jobs[i][0]:
-        #             mlp(x, v1, w1, w2, expert_outs)
-        #             arr_map[f"{i}.{e}"] = len(expert_outs) - 1
-        #         elif jobs[i][1] > 0:
-        #             mlp(x, v1, w1, w2, expert_outs)
-        #             jobs[i][1] -= 1
+        print("started expert calculation", flush=True)
 
-        # expert_outs = mx.stack(expert_outs, axis=0)
-        # mx.eval(expert_outs)
-        # arr_bytes = mx_to_bytes(expert_outs)
-        # arr_map_bytes = pickle.dumps(arr_map)
+        for e in self.experts:
+            v1, w1, w2 = next(self.experts[e]["generator"])
+            for i, x in enumerate(inputs):
+                if e in jobs[i][0]:
+                    mlp(x, v1, w1, w2, expert_outs)
+                    arr_map[f"{i}.{e}"] = len(expert_outs) - 1
+                elif jobs[i][1] > 0:
+                    mlp(x, v1, w1, w2, expert_outs)
+                    jobs[i][1] -= 1
 
-        mx.eval(inputs)
-        arr_bytes = mx_to_bytes(inputs)
-        arr_map_bytes = pickle.dumps({})
+        expert_outs = mx.stack(expert_outs, axis=0)
+        mx.eval(expert_outs)
+        arr_bytes = mx_to_bytes(expert_outs)
+        arr_map_bytes = pickle.dumps(arr_map)
+
+        print("stopped expert calculation", flush=True)
 
         tic = time.perf_counter()
 
@@ -197,7 +195,7 @@ class DBRX(nn.Module):
     async def __call__(self):
         batch_size = 10
         xs = mx.random.uniform(-1, 1, (batch_size, 6144), mx.bfloat16)
-        # self.moe_shard.reset_expert_generators()
+        self.moe_shard.reset_expert_generators()
         for layer in self.blocks:
             inds = [
                 self.rng.choice(16, size=4, replace=False).tolist()
@@ -273,6 +271,8 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         return shard_pb2.Outputs()
 
     def Receive(self, request: shard_pb2.ShardOuts, context):
+        print(f"started receiving from {request.url} for {request.block_num}", flush=True)
+
         block = self.model.blocks[request.block_num]
         block.buffer[request.url] = {
             "expert_outs": bytes_to_mx(request.data),
@@ -281,6 +281,8 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
         if len(block.buffer) == self.num_other_shards:
             block.sync_complete.set()
+
+        print(f"stopped receiving from {request.url} for {request.block_num}", flush=True)
 
         return shard_pb2.Empty()
 
