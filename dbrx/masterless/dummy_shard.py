@@ -55,26 +55,26 @@ class MoeShard:
     def __init__(
         self,
         url: str,
-        experts: dict,
+        # experts: dict,
     ) -> None:
         self.url = url
-        self.other_shards = None  # set when inference call is made
-        self.experts = experts
-        self.act_fn = nn.silu
+        # self.other_shards = None  # set when inference call is made
+        # self.experts = experts
+        # self.act_fn = nn.silu
 
-    def get_expert_generator(self, e: int):
-        v1, w1 = None, None
-        for i, weight in enumerate(self.experts[e]["weights"]):
-            if i % 3 == 0:
-                v1 = weight.T
-            elif i % 3 == 1:
-                w1 = weight.T
-            else:
-                yield v1, w1, weight
+    # def get_expert_generator(self, e: int):
+    #     v1, w1 = None, None
+    #     for i, weight in enumerate(self.experts[e]["weights"]):
+    #         if i % 3 == 0:
+    #             v1 = weight.T
+    #         elif i % 3 == 1:
+    #             w1 = weight.T
+    #         else:
+    #             yield v1, w1, weight
 
-    def reset_expert_generators(self):
-        for e in self.experts:
-            self.experts[e]["generator"] = self.get_expert_generator(e)
+    # def reset_expert_generators(self):
+    #     for e in self.experts:
+    #         self.experts[e]["generator"] = self.get_expert_generator(e)
 
     async def send(
         self,
@@ -97,27 +97,31 @@ class MoeShard:
         # job[1] indicates num additional calculations needed to avoid
         # wire memory driver activity from surfacing
 
-        def mlp(x, v1, w1, w2, dst):
-            y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
-            dst.append(y)
+        # def mlp(x, v1, w1, w2, dst):
+        #     y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
+        #     dst.append(y)
 
-        expert_outs = []
-        arr_map = {}
+        # expert_outs = []
+        # arr_map = {}
 
-        for e in self.experts:
-            v1, w1, w2 = next(self.experts[e]["generator"])
-            for i, x in enumerate(inputs):
-                if e in jobs[i][0]:
-                    mlp(x, v1, w1, w2, expert_outs)
-                    arr_map[f"{i}.{e}"] = len(expert_outs) - 1
-                elif jobs[i][1] > 0:
-                    mlp(x, v1, w1, w2, expert_outs)
-                    jobs[i][1] -= 1
+        # for e in self.experts:
+        #     v1, w1, w2 = next(self.experts[e]["generator"])
+        #     for i, x in enumerate(inputs):
+        #         if e in jobs[i][0]:
+        #             mlp(x, v1, w1, w2, expert_outs)
+        #             arr_map[f"{i}.{e}"] = len(expert_outs) - 1
+        #         elif jobs[i][1] > 0:
+        #             mlp(x, v1, w1, w2, expert_outs)
+        #             jobs[i][1] -= 1
 
-        expert_outs = mx.stack(expert_outs, axis=0)
-        mx.eval(expert_outs)
-        arr_bytes = mx_to_bytes(expert_outs)
-        arr_map_bytes = pickle.dumps(arr_map)
+        # expert_outs = mx.stack(expert_outs, axis=0)
+        # mx.eval(expert_outs)
+        # arr_bytes = mx_to_bytes(expert_outs)
+        # arr_map_bytes = pickle.dumps(arr_map)
+
+        mx.eval(inputs)
+        arr_bytes = mx_to_bytes(inputs)
+        arr_map_bytes = pickle.dumps({})
 
         tic = time.perf_counter()
 
@@ -126,8 +130,6 @@ class MoeShard:
                 tg.create_task(self.send(shard, block_num, arr_bytes, arr_map_bytes))
 
         print(f"communication took: {time.perf_counter() - tic} sec(s)", flush=True)
-
-        return expert_outs, arr_map
 
 
 class DistributedMoeBlock(nn.Module):
@@ -231,17 +233,18 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         return model_args
 
     def load_model(self) -> DBRX:
-        url = self.model_args.ffn_config["shard_url"]
-        assigned_experts = self.model_args.ffn_config["shard_map"][url]
-        # sample:
-        # {0: {"weights": mx.array([0, 1, 2, 3])}}
-        experts = {
-            e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
-            for e in assigned_experts
-        }
-        mx.eval(experts)
+        # url = self.model_args.ffn_config["shard_url"]
+        # assigned_experts = self.model_args.ffn_config["shard_map"][url]
+        # # sample:
+        # # {0: {"weights": mx.array([0, 1, 2, 3])}}
+        # experts = {
+        #     e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
+        #     for e in assigned_experts
+        # }
+        # mx.eval(experts)
 
-        model = DBRX(self.model_args, experts)
+        # model = DBRX(self.model_args, experts)
+        model = DBRX(self.model_args)
         model.eval()
 
         return model
