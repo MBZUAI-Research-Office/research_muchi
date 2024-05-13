@@ -112,16 +112,20 @@ class MoeShard:
                     mlp(x, v1, w1, w2, expert_outs)
                     jobs[i][1] -= 1
 
+        print("started expert calculation", flush=True)
+        tic = time.perf_counter()
+
         expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
 
-        print("started expert calculation", flush=True)
+        print(f"expert calculation took {time.perf_counter() - tic}", flush=True)
+        print("started serialization", flush=True)
+        tic = time.perf_counter()
 
         arr_bytes = mx_to_bytes(expert_outs)
         arr_map_bytes = pickle.dumps(arr_map)
 
-        print("stopped expert calculation", flush=True)
-
+        print(f"serialization took {time.perf_counter() - tic}", flush=True)
         tic = time.perf_counter()
 
         async with asyncio.TaskGroup() as tg:
@@ -282,8 +286,6 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
         if len(block.buffer) == self.num_other_shards:
             block.sync_complete.set()
-
-        print(f"stopped receiving from {request.url} for {request.block_num}", flush=True)
 
         return shard_pb2.Empty()
 
