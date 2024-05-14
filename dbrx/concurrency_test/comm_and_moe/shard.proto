@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+service Shard {
+  rpc Start (Inputs) returns (Outputs) {}
+  rpc Receive (ShardOuts) returns (Empty) {}
+}
+
+message Inputs {
+  string prompt = 1;
+  int32 max_tokens = 2;
+}
+
+message Outputs {
+  double prompt_time = 1;
+  int32 prompt_t_cnt = 2;
+  double gen_time = 3;
+  int32 gen_t_cnt = 4;
+  string response = 5;
+}
+
+message ShardOuts {
+  string url = 1;
+  int32 block_num = 2;
+  bytes data = 3;
+  bytes arr_map = 4;
+}
+
+message Empty {}
