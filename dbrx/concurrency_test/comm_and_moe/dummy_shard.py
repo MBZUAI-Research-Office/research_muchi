@@ -172,6 +172,7 @@ class MoeShard:
         async with asyncio.TaskGroup() as tg:
             for shard in self.other_shards:
                 tg.create_task(self.send(shard, block_num, arr_bytes, arr_map_bytes))
+        del tg
 
         print(f"ended comm, took: {(time.perf_counter() - tic):.3f} sec(s)", flush=True)
 
