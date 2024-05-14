@@ -169,10 +169,12 @@ class MoeShard:
         print(f"started comm", flush=True)
         tic = time.perf_counter()
 
-        async with asyncio.TaskGroup() as tg:
-            for shard in self.other_shards:
-                tg.create_task(self.send(shard, block_num, arr_bytes, arr_map_bytes))
-        del tg
+        await asyncio.gather(
+            *[
+                self.send(shard, block_num, arr_bytes, arr_map_bytes)
+                for shard in self.other_shards
+            ]
+        )
 
         print(f"ended comm, took: {(time.perf_counter() - tic):.3f} sec(s)", flush=True)
 
@@ -352,7 +354,10 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         if len(block.buffer) == self.num_other_shards:
             block.sync_complete.set()
 
-        print(f"ended receiving, took: {(time.perf_counter() - tic):.3f} sec(s)", flush=True)
+        print(
+            f"ended receiving, took: {(time.perf_counter() - tic):.3f} sec(s)",
+            flush=True,
+        )
         return shard_pb2.Empty()
 
 
