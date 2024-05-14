@@ -340,6 +340,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
     def Receive(self, request: shard_pb2.ShardOuts, context):
         print(f"receiving from {request.url} for {request.block_num}", flush=True)
+        tic = time.perf_counter()
 
         block = self.model.blocks[request.block_num]
         block.buffer[request.url] = {
@@ -350,6 +351,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         if len(block.buffer) == self.num_other_shards:
             block.sync_complete.set()
 
+        print(f"ended receiving, took: {(time.perf_counter() - tic):.3f} sec(s)", flush=True)
         return shard_pb2.Empty()
 
 
