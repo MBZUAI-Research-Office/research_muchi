@@ -335,7 +335,7 @@ class LocalDriverServicer(local_driver_pb2_grpc.LocalDriverServicer):
         model_args = ModelArgs.from_dict(config)
         model_args.ffn_config["expert_map"] = {}
 
-        for url, assigned_experts in model_args.ffn_config["shard_map"].items():
+        for url, assigned_experts in model_args.ffn_config["driver_map"].items():
             for e in assigned_experts:
                 model_args.ffn_config["expert_map"][e] = url
 
