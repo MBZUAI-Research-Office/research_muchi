@@ -1,16 +1,16 @@
 syntax = "proto3";
 
 service LocalDriver {
-  rpc Start (Inputs) returns (Outputs) {}
+  rpc Start (UsrInputs) returns (UsrOutputs) {}
   rpc Receive (MoeShardOuts) returns (Empty) {}
 }
 
-message Inputs {
+message UsrInputs {
   string prompt = 1;
   int32 max_tokens = 2;
 }
 
-message Outputs {
+message UsrOutputs {
   double prompt_time = 1;
   int32 prompt_t_cnt = 2;
   double gen_time = 3;

@@ -388,7 +388,7 @@ class LocalDriverServicer(local_driver_pb2_grpc.LocalDriverServicer):
         prompt: str,
         max_tokens: int,
         temp: float,
-    ) -> local_driver_pb2.Outputs:
+    ) -> local_driver_pb2.UsrOutputs:
         prompt_tokens = mx.array(tokenizer.encode(prompt))
 
         tic = time.perf_counter()
@@ -427,7 +427,7 @@ class LocalDriverServicer(local_driver_pb2_grpc.LocalDriverServicer):
         token_strings.append(tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, ""))
         gen_time = time.perf_counter() - tic
 
-        return local_driver_pb2.Outputs(
+        return local_driver_pb2.UsrOutputs(
             prompt_time=prompt_time,
             prompt_t_cnt=prompt_tokens.size,
             gen_time=gen_time,
@@ -435,7 +435,7 @@ class LocalDriverServicer(local_driver_pb2_grpc.LocalDriverServicer):
             response="".join(token_strings),
         )
 
-    async def Start(self, request: local_driver_pb2.Inputs, context) -> None:
+    async def Start(self, request: local_driver_pb2.UsrInputs, context) -> None:
         async with AsyncExitStack() as es:
             moe_shard_channel = await es.enter_async_context(
                 grpc.aio.insecure_channel(

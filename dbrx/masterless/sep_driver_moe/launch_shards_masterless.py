@@ -111,13 +111,10 @@ def main():
         raise
 
     driver_map = config["ffn_config"]["driver_map"]
-    pure_urls = [url.split(":")[0] for url in driver_map.keys()]
-    url_port_map = {url: [] for url in pure_urls}
+    url_port_map = {}
     for url in driver_map:
         pure_url, port = url.split(":")
-        port = int(port)
-        url_port_map[pure_url].append(port)
-        url_port_map[pure_url].append(port + 1)
+        url_port_map[pure_url] = [port, str(int(port) + 1)]
 
     for url, ports in url_port_map.items():
         print(f"Shard: {url} {ports} ", end="")

@@ -121,7 +121,7 @@ def main():
     # activate local_driver
     Cmd(f"""tmux send-keys -t 0 'clear' Enter \;""")
     Cmd(f"""tmux send-keys -t 0 'conda activate dbrx_poc' Enter \;""")
-    Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/masterless/bind_driver_moe' Enter \;""")
+    Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/masterless/sep_driver_moe' Enter \;""")
     Cmd(
         f"""tmux send-keys -t 0 'python local_driver.py --port {ports[0]}"""
         + f""" --model-path ~/dbrx-base/distributable/batch2"""
@@ -131,7 +131,7 @@ def main():
     # activate moe_shard
     Cmd(f"""tmux send-keys -t 1 'clear' Enter \;""")
     Cmd(f"""tmux send-keys -t 1 'conda activate dbrx_poc' Enter \;""")
-    Cmd(f"""tmux send-keys -t 1 'cd ~/research_muchi/dbrx/masterless/bind_driver_moe' Enter \;""")
+    Cmd(f"""tmux send-keys -t 1 'cd ~/research_muchi/dbrx/masterless/sep_driver_moe' Enter \;""")
     Cmd(
         f"""tmux send-keys -t 1 'python moe_shard.py --port {ports[1]}"""
         + f""" --model-path ~/dbrx-base/distributable/batch2"""

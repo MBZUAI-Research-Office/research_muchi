@@ -4,7 +4,7 @@ from typing import ClassVar as _ClassVar, Optional as _Optional
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
-class Inputs(_message.Message):
+class UsrInputs(_message.Message):
     __slots__ = ("prompt", "max_tokens")
     PROMPT_FIELD_NUMBER: _ClassVar[int]
     MAX_TOKENS_FIELD_NUMBER: _ClassVar[int]
@@ -12,7 +12,7 @@ class Inputs(_message.Message):
     max_tokens: int
     def __init__(self, prompt: _Optional[str] = ..., max_tokens: _Optional[int] = ...) -> None: ...
 
-class Outputs(_message.Message):
+class UsrOutputs(_message.Message):
     __slots__ = ("prompt_time", "prompt_t_cnt", "gen_time", "gen_t_cnt", "response")
     PROMPT_TIME_FIELD_NUMBER: _ClassVar[int]
     PROMPT_T_CNT_FIELD_NUMBER: _ClassVar[int]

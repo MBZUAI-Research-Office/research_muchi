@@ -16,8 +16,8 @@ class LocalDriverStub(object):
         """
         self.Start = channel.unary_unary(
                 '/LocalDriver/Start',
-                request_serializer=local__driver__pb2.Inputs.SerializeToString,
-                response_deserializer=local__driver__pb2.Outputs.FromString,
+                request_serializer=local__driver__pb2.UsrInputs.SerializeToString,
+                response_deserializer=local__driver__pb2.UsrOutputs.FromString,
                 )
         self.Receive = channel.unary_unary(
                 '/LocalDriver/Receive',
@@ -46,8 +46,8 @@ def add_LocalDriverServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Start': grpc.unary_unary_rpc_method_handler(
                     servicer.Start,
-                    request_deserializer=local__driver__pb2.Inputs.FromString,
-                    response_serializer=local__driver__pb2.Outputs.SerializeToString,
+                    request_deserializer=local__driver__pb2.UsrInputs.FromString,
+                    response_serializer=local__driver__pb2.UsrOutputs.SerializeToString,
             ),
             'Receive': grpc.unary_unary_rpc_method_handler(
                     servicer.Receive,
@@ -76,8 +76,8 @@ class LocalDriver(object):
             timeout=None,
             metadata=None):
         return grpc.experimental.unary_unary(request, target, '/LocalDriver/Start',
-            local__driver__pb2.Inputs.SerializeToString,
-            local__driver__pb2.Outputs.FromString,
+            local__driver__pb2.UsrInputs.SerializeToString,
+            local__driver__pb2.UsrOutputs.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
