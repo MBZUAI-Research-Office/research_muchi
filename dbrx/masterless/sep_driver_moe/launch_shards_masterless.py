@@ -105,7 +105,7 @@ def main():
     parser.add_argument("--terminate", action="store_true")
     args = parser.parse_args()
     try:
-        with open(Path(args.model_path) / "broker_config.json", "r") as f:
+        with open(Path(args.model_path) / "v5_config.json", "r") as f:
             config = json.load(f)
     except FileNotFoundError:
         raise
