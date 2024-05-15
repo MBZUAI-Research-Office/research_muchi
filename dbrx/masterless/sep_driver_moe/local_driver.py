@@ -207,14 +207,22 @@ class DistributedMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
+
+        print(f"----------started pre moe_shard calculation----------", flush=True)
+
         mx.eval(inds, scores)
 
         inds = inds.tolist()
         jobs = self.design_jobs(inds)
 
+        print(f"----------started moe_shard calculation----------", flush=True)
+
         moe_shard_outs = await moe_shard.Execute(
             moe_shard_pb2.Inputs(data=mx_to_bytes(x), jobs=pickle.dumps(jobs))
         )
+
+        print(f"----------started communicating with other drivers----------", flush=True)
+
         async with asyncio.TaskGroup() as tg:
             for driver in other_drivers:
                 tg.create_task(
@@ -225,7 +233,13 @@ class DistributedMoeBlock(nn.Module):
                         moe_shard_outs.arr_map,
                     )
                 )
+
+        print(f"----------started waiting for buffer to be filled----------", flush=True)
+
         await sync_complete.wait()
+
+        print(f"----------started all-reduce calculation----------", flush=True)
+
         # here bc other shards could have filled the buffer before this shard finishes
         buffer[self.driver_url] = {
             "expert_outs": bytes_to_mx(moe_shard_outs.data),
