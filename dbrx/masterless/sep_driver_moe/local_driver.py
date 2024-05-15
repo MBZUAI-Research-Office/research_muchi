@@ -181,7 +181,7 @@ class DistributedMoeBlock(nn.Module):
     ):
         moe_shard_outs = local_driver_pb2.MoeShardOuts(
             url=self.driver_url,
-            block_num=layer_num,
+            layer_num=layer_num,
             data=arr_bytes,
             arr_map=arr_map_bytes,
         )

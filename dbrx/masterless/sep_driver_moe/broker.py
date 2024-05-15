@@ -24,14 +24,14 @@ def get_driver_urls(config_path: Path) -> list:
         logging.error(f"{config_path} not found")
         raise
 
-    return list(config["driver_map"].keys())
+    return list(config["ffn_config"]["driver_map"].keys())
 
 
 async def call(
     driver: local_driver_pb2_grpc.LocalDriverStub, prompt: str, max_tokens: int
-) -> local_driver_pb2.Outputs:
+) -> local_driver_pb2.UsrOutputs:
     return await driver.Start(
-        local_driver_pb2.Inputs(prompt=prompt, max_tokens=max_tokens)
+        local_driver_pb2.UsrInputs(prompt=prompt, max_tokens=max_tokens)
     )
 
 
