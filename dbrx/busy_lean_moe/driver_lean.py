@@ -151,10 +151,10 @@ class DistributedSparseMoeBlock(nn.Module):
         shard_jobs = {url: [] for url in self.moe_shard_map}
 
         for activated_experts in inds:
-            d = {}
+            d = {url: set() for url in self.moe_shard_map}
             for e in activated_experts:
                 url = self.expert_map[e]
-                d.setdefault(url, set()).add(e)
+                d[url].add(e)
 
             max_load = max([len(v) for v in d.values()])
             for url, job in d.items():
@@ -195,9 +195,9 @@ class DistributedSparseMoeBlock(nn.Module):
 
         async with asyncio.TaskGroup() as tg:
             exec_tasks = {}
-            for url, d in self.moe_shard_map.items():
+            for url, shard in self.moe_shard_map.items():
                 task = tg.create_task(
-                    self.execute_on_shard(d["shard"], x_bytes, shard_jobs[url])
+                    self.execute_on_shard(shard, x_bytes, shard_jobs[url])
                 )
                 exec_tasks[url] = task
 
@@ -270,7 +270,7 @@ class Driver:
 
     def get_model_args(self) -> ModelArgs:
         try:
-            with open(self.model_path / "driver_config.json", "r") as f:
+            with open(self.model_path / "driver_lean_config.json", "r") as f:
                 config = json.load(f)
         except FileNotFoundError:
             logging.error(f"driver_config.json not found in {self.model_path}")
@@ -395,7 +395,7 @@ class Driver:
                     )
                 )
                 shard = moe_shard_lean_pb2_grpc.MoeShardStub(channel)
-                model_args.ffn_config["moe_shard_map"][url]["shard"] = shard
+                model_args.ffn_config["moe_shard_map"][url] = shard
 
             model = DistributedDBRX(model_args)
             weights = mx.load(str(self.model_path / f"non-expert.safetensors"))

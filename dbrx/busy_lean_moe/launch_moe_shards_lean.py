@@ -1,9 +1,9 @@
 # Examples:
 #  launch all shards:
-#    python launch_moe_shards_ser.py --model-path ~/dbrx-base/distributable/batch2/
+#    python launch_moe_shards_lean.py --model-path ~/dbrx-base/distributable/batch2/
 #
 #  terminate all shards:
-#    python launch_moe_shards_ser.py --model-path ~/dbrx-base/distributable/batch2/ --terminate
+#    python launch_moe_shards_lean.py --model-path ~/dbrx-base/distributable/batch2/ --terminate
 import subprocess
 import time
 from types import SimpleNamespace
@@ -118,12 +118,12 @@ def main():
     for url, port in moe_shard_addr_split:
         print(f"Shard: {url} {port} ", end="")
         Cmd(
-            f"""scp -i ~/.ssh/id_llamacpp ./run_shard_ser.py xiangruike@{url}:/users/xiangruike"""
+            f"""scp -i ~/.ssh/id_llamacpp ./run_shard_lean.py xiangruike@{url}:/users/xiangruike"""
         )
         if args.terminate:
             rc, out, err = Cmd(
                 f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_ser.py --port {port} --terminate'"""
+                + f"""&& python3 /Users/xiangruike/run_shard_lean.py --port {port} --terminate'"""
             )
             if rc != 0:
                 print(err.strip())
@@ -132,7 +132,7 @@ def main():
         else:
             rc, out, err = Cmd(
                 f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_ser.py --port {port}'"""
+                + f"""&& python3 /Users/xiangruike/run_shard_lean.py --port {port}'"""
             )
             if rc != 0:
                 print(err.strip())
