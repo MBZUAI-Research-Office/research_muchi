@@ -558,7 +558,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     self.conn.send(request.prompt)
                     self.conn.send(request.max_tokens)
 
-                await self.all_dispatch(oth_shards)
+                await self.all_dispatch(i, oth_shards)
                 await self.sync_complete_events[i].wait()
 
                 for url, d in self.buffers[i]:
