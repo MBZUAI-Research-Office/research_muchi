@@ -2,10 +2,10 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-import shard_pb2 as shard__pb2
+import shard_envoy_pb2 as shard__envoy__pb2
 
 
-class ShardStub(object):
+class ShardEnvoyStub(object):
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -15,18 +15,18 @@ class ShardStub(object):
             channel: A grpc.Channel.
         """
         self.Start = channel.unary_unary(
-                '/Shard/Start',
-                request_serializer=shard__pb2.Inputs.SerializeToString,
-                response_deserializer=shard__pb2.Outputs.FromString,
+                '/ShardEnvoy/Start',
+                request_serializer=shard__envoy__pb2.UsrIns.SerializeToString,
+                response_deserializer=shard__envoy__pb2.UsrOuts.FromString,
                 )
         self.Receive = channel.unary_unary(
-                '/Shard/Receive',
-                request_serializer=shard__pb2.ShardOuts.SerializeToString,
-                response_deserializer=shard__pb2.Empty.FromString,
+                '/ShardEnvoy/Receive',
+                request_serializer=shard__envoy__pb2.ShardOuts.SerializeToString,
+                response_deserializer=shard__envoy__pb2.Empty.FromString,
                 )
 
 
-class ShardServicer(object):
+class ShardEnvoyServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def Start(self, request, context):
@@ -42,26 +42,26 @@ class ShardServicer(object):
         raise NotImplementedError('Method not implemented!')
 
 
-def add_ShardServicer_to_server(servicer, server):
+def add_ShardEnvoyServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'Start': grpc.unary_unary_rpc_method_handler(
                     servicer.Start,
-                    request_deserializer=shard__pb2.Inputs.FromString,
-                    response_serializer=shard__pb2.Outputs.SerializeToString,
+                    request_deserializer=shard__envoy__pb2.UsrIns.FromString,
+                    response_serializer=shard__envoy__pb2.UsrOuts.SerializeToString,
             ),
             'Receive': grpc.unary_unary_rpc_method_handler(
                     servicer.Receive,
-                    request_deserializer=shard__pb2.ShardOuts.FromString,
-                    response_serializer=shard__pb2.Empty.SerializeToString,
+                    request_deserializer=shard__envoy__pb2.ShardOuts.FromString,
+                    response_serializer=shard__envoy__pb2.Empty.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'Shard', rpc_method_handlers)
+            'ShardEnvoy', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
 
 
  # This class is part of an EXPERIMENTAL API.
-class Shard(object):
+class ShardEnvoy(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
@@ -75,9 +75,9 @@ class Shard(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/Shard/Start',
-            shard__pb2.Inputs.SerializeToString,
-            shard__pb2.Outputs.FromString,
+        return grpc.experimental.unary_unary(request, target, '/ShardEnvoy/Start',
+            shard__envoy__pb2.UsrIns.SerializeToString,
+            shard__envoy__pb2.UsrOuts.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
@@ -92,8 +92,8 @@ class Shard(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/Shard/Receive',
-            shard__pb2.ShardOuts.SerializeToString,
-            shard__pb2.Empty.FromString,
+        return grpc.experimental.unary_unary(request, target, '/ShardEnvoy/Receive',
+            shard__envoy__pb2.ShardOuts.SerializeToString,
+            shard__envoy__pb2.Empty.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

@@ -8,8 +8,8 @@ import json
 import logging
 
 import grpc
-import shard_pb2
-import shard_pb2_grpc
+import shard_envoy_pb2
+import shard_envoy_pb2_grpc
 
 
 DEFAULT_PROMPT = "hello"
@@ -28,9 +28,9 @@ def get_shard_urls(config_path: Path) -> list:
 
 
 async def call(
-    shard: shard_pb2_grpc.ShardStub, prompt: str, max_tokens: int
-) -> shard_pb2.Outputs:
-    return await shard.Start(shard_pb2.Inputs(prompt=prompt, max_tokens=max_tokens))
+    shard: shard_envoy_pb2_grpc.ShardEnvoyStub, prompt: str, max_tokens: int
+) -> shard_envoy_pb2.UsrOuts:
+    return await shard.Start(shard_envoy_pb2.UsrIns(prompt=prompt, max_tokens=max_tokens))
 
 
 async def start(config_path: str, prompt: str, max_tokens: int) -> None:
@@ -50,7 +50,7 @@ async def start(config_path: str, prompt: str, max_tokens: int) -> None:
                     ],
                 )
             )
-            shard = shard_pb2_grpc.ShardStub(channel)
+            shard = shard_envoy_pb2_grpc.ShardEnvoyStub(channel)
             shards.append(shard)
 
         async with asyncio.TaskGroup() as tg:
@@ -60,7 +60,7 @@ async def start(config_path: str, prompt: str, max_tokens: int) -> None:
 
         output = inference_tasks[0].result()
 
-    if max_tokens == 0:
+    if output.gen_t_cnt == 0:
         print("No tokens generated for this prompt")
         return
 
@@ -71,9 +71,9 @@ async def start(config_path: str, prompt: str, max_tokens: int) -> None:
     print(f"total time in sec(s): {output.prompt_time:.3f}")
     print(f"throughput: {(output.prompt_t_cnt / output.prompt_time):.3f} t/s")
     print("TOKEN GENERATION:")
-    print(f"token count: {output.gen_t_cnt}")
+    print(f"token count: {output.gen_t_cnt - 1}")
     print(f"total time in sec(s): {output.gen_time:.3f}")
-    print(f"throughput: {(output.gen_t_cnt / output.gen_time):.3f} t/s")
+    print(f"throughput: {((output.gen_t_cnt - 1) / output.gen_time):.3f} t/s")
 
 
 if __name__ == "__main__":

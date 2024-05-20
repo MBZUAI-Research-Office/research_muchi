@@ -1,6 +1,5 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
-from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from multiprocessing import connection
@@ -11,16 +10,18 @@ import asyncio
 import inspect
 import json
 import logging
+import pickle
+import multiprocessing
 import time
 
 import grpc
-import shard_pb2
-import shard_pb2_grpc
+import shard_envoy_pb2
+import shard_envoy_pb2_grpc
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoTokenizer
 
 from serialization_utils import mx_to_bytes, bytes_to_mx
 
@@ -198,11 +199,13 @@ class DistributedMoeBlock(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.d_model = args.d_model
+        self.shard_url = args.ffn_config["shard_url"]
+        self.n_oth_shards = len(args.ffn_config["shard_map"]) - 1
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
         self.expert_map = args.ffn_config["expert_map"]
         self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
-    def design_jobs(self, inds: list[list[int]], my_url: str) -> list:
+    def design_jobs(self, inds: list[list[int]]) -> list:
         jobs = []
 
         for activated_experts in inds:
@@ -211,7 +214,7 @@ class DistributedMoeBlock(nn.Module):
 
             for e in activated_experts:
                 url = self.expert_map[e]
-                if url == my_url:
+                if url == self.shard_url:
                     job[0].add(e)
                 shard_loads[url] = shard_loads.get(url, 0) + 1
 
@@ -222,21 +225,19 @@ class DistributedMoeBlock(nn.Module):
 
     def dispatch_and_combine(
         self,
-        url: str,
         expert_outs: mx.array,
         arr_map: dict,
-        envoy: connection.Connection,
-        n_oth_shards: int,
+        conn: connection.Connection,
     ):
         shard_outs = {}
-        shard_outs[url] = {"expert_outs": expert_outs, "arr_map": arr_map}
-        envoy.send_bytes(mx_to_bytes(expert_outs))
-        envoy.send(arr_map)
+        shard_outs[self.shard_url] = {"expert_outs": expert_outs, "arr_map": arr_map}
+        conn.send_bytes(mx_to_bytes(expert_outs))
+        conn.send_bytes(pickle.dumps(arr_map))
 
-        for _ in range(n_oth_shards):
-            oth_url = envoy.recv()
-            oth_eo = bytes_to_mx(envoy.recv_bytes())
-            oth_am = envoy.recv()
+        for _ in range(self.n_oth_shards):
+            oth_url = conn.recv()
+            oth_eo = bytes_to_mx(conn.recv_bytes())
+            oth_am = pickle.loads(conn.recv_bytes())
             shard_outs[oth_url] = {"expert_outs": oth_eo, "arr_map": oth_am}
 
         return shard_outs
@@ -245,9 +246,7 @@ class DistributedMoeBlock(nn.Module):
         self,
         x: mx.array,
         shard: MoeShard,
-        url: str,
-        envoy: connection.Connection,
-        n_oth_shards: int,
+        conn: connection.Connection,
     ) -> mx.array:
         ne = self.num_experts_per_tok
         orig_shape = x.shape
@@ -263,12 +262,10 @@ class DistributedMoeBlock(nn.Module):
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs = self.design_jobs(inds, url)
+        jobs = self.design_jobs(inds)
 
         expert_outs, arr_map = shard(x, jobs)
-        shard_outs = self.dispatch_and_combine(
-            url, expert_outs, arr_map, envoy, n_oth_shards
-        )
+        shard_outs = self.dispatch_and_combine(expert_outs, arr_map, conn)
         y = []
 
         for bi, st, it in zip(range(x.shape[0]), scores, inds):
@@ -297,25 +294,23 @@ class DecoderLayer(nn.Module):
         self,
         x: mx.array,
         shard: MoeShard,
-        url: str,
-        envoy: connection.Connection,
-        n_oth_shards: int,
+        conn: connection.Connection,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
         r, h, cache = self.norm_attn_norm(x, mask, cache)
-        out = self.ffn(h, shard, url, envoy, n_oth_shards) + r
+        out = self.ffn(h, shard, conn) + r
         return out, cache
 
 
 class DBRX(nn.Module):
-    def __init__(self, args: ModelArgs, experts: mx.array):
+    def __init__(self, args: ModelArgs, experts: mx.array, conn: connection.Connection):
         super().__init__()
-        self.shard_url = args.shard_url
         self.vocab_size = args.vocab_size
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
-        self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
+        self.blocks = [DecoderLayer(args) for _ in range(args.n_layers)]
         self.moe_shard = MoeShard(experts)
+        self.conn = conn
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
         self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
 
@@ -337,22 +332,23 @@ class DBRX(nn.Module):
 
         self.moe_shard.reset_expert_generators()
         for e, layer in enumerate(self.blocks):
-            h, cache[e] = layer(h, self.moe_shard, self.shard_url, mask, cache[e])
+            h, cache[e] = layer(h, self.moe_shard, self.conn, mask, cache[e])
 
         return self.lm_head(self.norm_f(h)), cache
 
 
-class ShardServicer(shard_pb2_grpc.ShardServicer):
+class Generator:
 
-    def __init__(self, model_path: str, config_filename: str) -> None:
+    def __init__(
+        self, model_path: str, config_filename: str, conn: connection.Connection
+    ) -> None:
         mx.random.seed(DEFAULT_SEED)
         self.model_path = Path(model_path)
         self.model_args = self.get_model_args(config_filename)
-        self.model = self.load_model()
+        self.model = self.load_model(conn)
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path, trust_remote_code=True
         )
-        self.num_other_shards = len(self.model_args.ffn_config["shard_map"]) - 1
 
     def get_model_args(self, config_filename: str) -> ModelArgs:
         try:
@@ -371,7 +367,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
         return model_args
 
-    def load_model(self) -> DBRX:
+    def load_model(self, conn: connection.Connection) -> DBRX:
         url = self.model_args.ffn_config["shard_url"]
         assigned_experts = self.model_args.ffn_config["shard_map"][url]
         # sample:
@@ -382,7 +378,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         }
         mx.eval(experts)
 
-        model = DBRX(self.model_args, experts)
+        model = DBRX(self.model_args, experts, conn)
         non_expert_weights = mx.load(str(self.model_path / f"non-expert.safetensors"))
         model.load_weights(list(non_expert_weights.items()))
         mx.eval(model.parameters())
@@ -390,12 +386,7 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
 
         return model
 
-    async def generate_step(
-        self,
-        model: nn.Module,
-        prompt: mx.array,
-        temp: float,
-    ) -> AsyncGenerator[Tuple[mx.array, mx.array]]:
+    def generate_step(self, prompt: mx.array, temp: float):
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
             softmax_logits = mx.softmax(logits)
@@ -412,70 +403,145 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
         cache = None
 
         while True:
-            logits, cache = await model(y[None], cache=cache)
+            logits, cache = self.model(y[None], cache=cache)
             logits = logits[:, -1, :]
             y, prob = sample(logits)
             yield y, prob
 
     async def generate(
         self,
-        model: nn.Module,
-        tokenizer: PreTrainedTokenizer,
         prompt: str,
         max_tokens: int,
         temp: float,
-    ) -> shard_pb2.Outputs:
-        prompt_tokens = mx.array(tokenizer.encode(prompt))
+    ):
+        prompt_tokens = mx.array(self.tokenizer.encode(prompt))
 
         tic = time.perf_counter()
         tokens = []
         token_strings = []
         REPLACEMENT_CHAR = "\ufffd"
 
-        n = 0
-        async for token, prob in self.generate_step(
-            model,
-            prompt_tokens,
-            temp,
+        for (token, prob), n in zip(
+            self.generate_step(prompt_tokens, temp), range(max_tokens)
         ):
-            if n >= max_tokens:
-                break
-
             token = token.item()  # get word ID
             if n == 0:
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
-            if token == tokenizer.eos_token_id:
-                n += 1
+            if token == self.tokenizer.eos_token_id:
                 break
             tokens.append(token)
 
-            s = tokenizer.decode(tokens)  # str
+            s = self.tokenizer.decode(tokens)  # str
             # Reset token cache at line break
             if s[-1] == "\n":
                 tokens = []
                 token_strings.append(s)
 
-            n += 1
-
-        token_strings.append(tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, ""))
+        token_count = n + 1
+        token_strings.append(
+            self.tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, "")
+        )
         gen_time = time.perf_counter() - tic
 
-        return shard_pb2.Outputs(
-            prompt_time=prompt_time,
-            prompt_t_cnt=prompt_tokens.size,
-            gen_time=gen_time,
-            gen_t_cnt=n - 1,
-            response="".join(token_strings),
+        return (
+            prompt_time,
+            prompt_tokens.size,
+            gen_time,
+            token_count,
+            "".join(token_strings),
         )
 
-    async def Start(self, request: shard_pb2.Inputs, context) -> None:
-        async with AsyncExitStack() as es:
-            other_shards = []
 
-            for url in self.model_args.ffn_config["shard_map"]:
-                if url == self.model_args.ffn_config["shard_url"]:
-                    continue
+def shard_main(
+    model_path: str, config_filename: str, conn: connection.Connection
+) -> None:
+    logging.basicConfig(level=logging.INFO)
+    generator = Generator(model_path, config_filename)
+    prompt = conn.recv()
+    max_tokens = conn.recv()
+    res = generator.generate(prompt, max_tokens, DEFAULT_TEMP)
+    conn.send(res)
+
+
+class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
+
+    def __init__(
+        self, model_path: str, config_filename: str, conn: connection.Connection
+    ) -> None:
+        self.conn = conn
+        self.config = self.get_config(model_path, config_filename)
+
+        self.buffers = []
+        self.sync_complete_events = []
+        for _ in range(self.config["n_layers"]):
+            self.buffers.append({})
+            self.sync_complete_events.append(asyncio.Event())
+
+    def reset_buffer_mechanism(self, i: int):
+        self.buffers[i] = {}
+        self.sync_complete_events[i].clear()
+
+    def get_config(self, model_path: str, config_filename: str) -> dict:
+        try:
+            with open(Path(model_path) / config_filename, "r") as f:
+                tmp = json.load(f)
+        except FileNotFoundError:
+            logging.error(f"{config_filename} not found in {model_path}")
+            raise
+
+        config = {
+            "n_layers": tmp["n_layers"],
+            "url": tmp["ffn_config"]["shard_url"],
+            "oth_urls": [],
+        }
+
+        for url in tmp["ffn_config"]["shard_map"]:
+            if url == config["url"]:
+                continue
+            config["oth_urls"].append(url)
+
+        return config
+
+    async def send(
+        self,
+        shard: shard_envoy_pb2_grpc.ShardEnvoyStub,
+        layer_num: int,
+        a_bytes: bytes,
+        am_bytes: bytes,
+    ):
+        await shard.Receive(
+            shard_envoy_pb2.ShardOuts(
+                url=self.config["url"],
+                layer_num=layer_num,
+                data=a_bytes,
+                arr_map=am_bytes,
+            )
+        )
+
+    async def all_dispatch(
+        self, layer_num: int, oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub]
+    ) -> tuple:
+        a_bytes = self.conn.recv_bytes()
+        am_bytes = self.conn.recv_bytes()
+
+        async with asyncio.TaskGroup() as tg:
+            for shard in oth_shards:
+                tg.create_task(self.send(shard, layer_num, a_bytes, am_bytes))
+
+    def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
+        buffer = self.buffers[request.layer_num]
+        buffer[request.url] = {"eo_bytes": request.data, "am_bytes": request.arr_map}
+
+        if len(buffer) == len(self.config["oth_urls"]):
+            self.sync_complete_events[request.layer_num].set()
+
+        return shard_envoy_pb2.Empty()
+
+    async def Start(self, request: shard_envoy_pb2.UsrIns, context) -> None:
+        async with AsyncExitStack() as es:
+            oth_shards = []
+            for url in self.config["oth_urls"]:
                 channel = await es.enter_async_context(
                     grpc.aio.insecure_channel(
                         url,
@@ -485,30 +551,46 @@ class ShardServicer(shard_pb2_grpc.ShardServicer):
                         ],
                     )
                 )
-                shard = shard_pb2_grpc.ShardStub(channel)
-                other_shards.append(shard)
+                shard = shard_envoy_pb2_grpc.ShardEnvoyStub(channel)
+                oth_shards.append(shard)
 
-            self.model.moe_shard.other_shards = other_shards
-            response = await self.generate(
-                self.model,
-                self.tokenizer,
-                request.prompt,
-                request.max_tokens,
-                DEFAULT_TEMP,
-            )
+            for i in range(self.config["n_layers"]):
+                if i == 0:
+                    self.conn.send(request.prompt)
+                    self.conn.send(request.max_tokens)
 
-        return response
+                await self.all_dispatch(oth_shards)
+                await self.sync_complete_events[i].wait()
+
+                for url, d in self.buffers[i]:
+                    self.conn.send(url)
+                    self.conn.send_bytes(d["eo_bytes"])
+                    self.conn.send_bytes(d["am_bytes"])
+
+                self.reset_buffer_mechanism(i)
+
+        prompt_time, prompt_t_cnt, gen_time, gen_t_cnt, response = self.conn.recv()
+
+        return shard_envoy_pb2.UsrOuts(
+            prompt_time=prompt_time,
+            prompt_t_cnt=prompt_t_cnt,
+            gen_time=gen_time,
+            gen_t_cnt=gen_t_cnt,
+            response=response,
+        )
 
 
-async def serve(port: int, model_path: str, config_filename: str):
+async def serve(
+    port: int, model_path: str, config_filename: str, conn: connection.Connection
+):
     server = grpc.aio.server(
         options=[
             ("grpc.max_send_message_length", -1),
             ("grpc.max_receive_message_length", -1),
         ]
     )
-    shard_pb2_grpc.add_ShardServicer_to_server(
-        ShardServicer(model_path, config_filename), server
+    shard_envoy_pb2_grpc.add_ShardEnvoyServicer_to_server(
+        ShardEnvoyServicer(model_path, config_filename, conn), server
     )
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
@@ -528,6 +610,18 @@ async def serve(port: int, model_path: str, config_filename: str):
     await server.wait_for_termination()
 
 
+def envoy_main(
+    port: int, model_path: str, config_filename: str, conn: connection.Connection
+):
+    logging.basicConfig(level=logging.INFO)
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(serve(port, model_path, config_filename, conn))
+    finally:
+        loop.run_until_complete(*_cleanup_coroutines)
+        loop.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int)
@@ -535,10 +629,18 @@ if __name__ == "__main__":
     parser.add_argument("--config-filename", type=str)
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(serve(args.port, args.model_path, args.config_filename))
-    finally:
-        loop.run_until_complete(*_cleanup_coroutines)
-        loop.close()
+    envoy_conn, shard_conn = multiprocessing.Pipe()
+
+    envoy_p = multiprocessing.Process(
+        target=envoy_main,
+        args=(args.port, args.model_path, args.config_filename, envoy_conn),
+    )
+    shard_p = multiprocessing.Process(
+        target=shard_main, args=(args.model_path, args.config_filename, shard_conn)
+    )
+
+    envoy_p.start()
+    shard_p.start()
+
+    envoy_p.join()
+    shard_p.join()

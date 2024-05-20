@@ -4,7 +4,7 @@ from typing import ClassVar as _ClassVar, Optional as _Optional
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
-class Inputs(_message.Message):
+class UsrIns(_message.Message):
     __slots__ = ("prompt", "max_tokens")
     PROMPT_FIELD_NUMBER: _ClassVar[int]
     MAX_TOKENS_FIELD_NUMBER: _ClassVar[int]
@@ -12,7 +12,7 @@ class Inputs(_message.Message):
     max_tokens: int
     def __init__(self, prompt: _Optional[str] = ..., max_tokens: _Optional[int] = ...) -> None: ...
 
-class Outputs(_message.Message):
+class UsrOuts(_message.Message):
     __slots__ = ("prompt_time", "prompt_t_cnt", "gen_time", "gen_t_cnt", "response")
     PROMPT_TIME_FIELD_NUMBER: _ClassVar[int]
     PROMPT_T_CNT_FIELD_NUMBER: _ClassVar[int]
@@ -27,16 +27,16 @@ class Outputs(_message.Message):
     def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., response: _Optional[str] = ...) -> None: ...
 
 class ShardOuts(_message.Message):
-    __slots__ = ("url", "block_num", "data", "arr_map")
+    __slots__ = ("url", "layer_num", "data", "arr_map")
     URL_FIELD_NUMBER: _ClassVar[int]
-    BLOCK_NUM_FIELD_NUMBER: _ClassVar[int]
+    LAYER_NUM_FIELD_NUMBER: _ClassVar[int]
     DATA_FIELD_NUMBER: _ClassVar[int]
     ARR_MAP_FIELD_NUMBER: _ClassVar[int]
     url: str
-    block_num: int
+    layer_num: int
     data: bytes
     arr_map: bytes
-    def __init__(self, url: _Optional[str] = ..., block_num: _Optional[int] = ..., data: _Optional[bytes] = ..., arr_map: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, url: _Optional[str] = ..., layer_num: _Optional[int] = ..., data: _Optional[bytes] = ..., arr_map: _Optional[bytes] = ...) -> None: ...
 
 class Empty(_message.Message):
     __slots__ = ()
