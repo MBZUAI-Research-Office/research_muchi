@@ -407,7 +407,7 @@ class Generator:
             y, prob = sample(logits)
             yield y, prob
 
-    async def generate(
+    def generate(
         self,
         prompt: str,
         max_tokens: int,
