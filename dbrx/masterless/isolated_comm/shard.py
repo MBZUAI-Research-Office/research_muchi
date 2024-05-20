@@ -456,7 +456,7 @@ def shard_main(
     model_path: str, config_filename: str, conn: connection.Connection
 ) -> None:
     logging.basicConfig(level=logging.INFO)
-    generator = Generator(model_path, config_filename)
+    generator = Generator(model_path, config_filename, conn)
     prompt = conn.recv()
     max_tokens = conn.recv()
     res = generator.generate(prompt, max_tokens, DEFAULT_TEMP)

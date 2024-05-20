@@ -128,7 +128,7 @@ def main():
         else:
             rc, out, err = Cmd(
                 f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{pure_url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --ports {port}'"""
+                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --port {port}'"""
             )
             if rc != 0:
                 print(err.strip())
