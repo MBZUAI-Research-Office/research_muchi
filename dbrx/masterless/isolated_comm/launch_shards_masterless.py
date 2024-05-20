@@ -110,22 +110,16 @@ def main():
     except FileNotFoundError:
         raise
 
-    shard_map = config["ffn_config"]["shard_map"]
-    pure_urls = [url.split(":")[0] for url in shard_map.keys()]
-    url_port_map = {url: [] for url in pure_urls}
-    for url, experts in shard_map.items():
+    for url in config["ffn_config"]["shard_map"]:
         pure_url, port = url.split(":")
-        url_port_map[pure_url].append(port)
-
-    for url, ports in url_port_map.items():
-        print(f"Shard: {url} {ports} ", end="")
+        print(f"Shard: {pure_url} {port} ", end="")
         Cmd(
-            f"""scp -i ~/.ssh/id_llamacpp ./run_shard_masterless.py xiangruike@{url}:/users/xiangruike"""
+            f"""scp -i ~/.ssh/id_llamacpp ./run_shard_masterless.py xiangruike@{pure_url}:/users/xiangruike"""
         )
         if args.terminate:
             rc, out, err = Cmd(
-                f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --ports "{','.join(ports)}" --terminate'"""
+                f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{pure_url} 'export PATH="$PATH:/opt/homebrew/bin/" """
+                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --port {port} --terminate'"""
             )
             if rc != 0:
                 print(err.strip())
@@ -133,8 +127,8 @@ def main():
                 print("[terminated successfully]")
         else:
             rc, out, err = Cmd(
-                f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --ports "{','.join(ports)}"'"""
+                f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{pure_url} 'export PATH="$PATH:/opt/homebrew/bin/" """
+                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --ports {port}'"""
             )
             if rc != 0:
                 print(err.strip())

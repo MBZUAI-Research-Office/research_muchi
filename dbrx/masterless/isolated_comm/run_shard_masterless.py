@@ -97,11 +97,10 @@ def list_of_strings(arg):
 def main():
     parser = argparse.ArgumentParser()
     # parser.add_argument("--ports", required=True, type=str)
-    parser.add_argument("--ports", type=list_of_strings)
+    # parser.add_argument("--ports", type=list_of_strings)
+    parser.add_argument("--port", type=int)
     parser.add_argument("--terminate", action="store_true")
-
     args = parser.parse_args()
-    ports = args.ports
 
     print("Sorry, we need to kill the tmux server")
     Cmd("""tmux kill-server""")
@@ -115,19 +114,16 @@ def main():
         print(err, file=sys.stderr)
         sys.exit(1)
     Cmd("""tmux set-option -g mouse on""")
-    Cmd("""tmux split-window -hf zsh \;""")
-    Cmd("""tmux split-window -hf zsh \;""")
-    Cmd("""tmux split-window -hf zsh \;""")
-    Cmd("""tmux select-layout even-horizontal \;""")
-    for e, port in enumerate(ports):
-        Cmd(f"""tmux send-keys -t {e} 'clear' Enter \;""")
-        Cmd(f"""tmux send-keys -t {e} 'conda activate dbrx_poc' Enter \;""")
-        Cmd(f"""tmux send-keys -t {e} 'cd ~/research_muchi/dbrx/masterless' Enter \;""")
-        Cmd(
-            f"""tmux send-keys -t {e} 'python shard.py --port {port}"""
-            + f""" --model-path ~/dbrx-base/distributable/batch2"""
-            + f""" --config-filename shard_config_{e}.json' Enter \;""",
-        )
+
+    Cmd(f"""tmux send-keys -t 0 'clear' Enter \;""")
+    Cmd(f"""tmux send-keys -t 0 'conda activate dbrx_poc' Enter \;""")
+    Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/masterless/isolated_comm' Enter \;""")
+    Cmd(
+        f"""tmux send-keys -t 0 'python shard.py --port {args.port}"""
+        + f""" --model-path ~/dbrx-base/distributable/batch2"""
+        + f""" --config-filename shard_config_0.json' Enter \;""",
+    )
+
     # Cmd("""tmux -f /dev/null attach -t dbrx_poc""")
 
 

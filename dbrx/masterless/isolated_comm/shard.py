@@ -36,7 +36,6 @@ _cleanup_coroutines = []
 
 @dataclass
 class ModelArgs:
-    shard_url: str
     vocab_size: int
     d_model: int
     ffn_config: dict
