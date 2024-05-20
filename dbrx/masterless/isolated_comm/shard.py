@@ -561,7 +561,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 await self.all_dispatch(i, oth_shards)
                 await self.sync_complete_events[i].wait()
 
-                for url, d in self.buffers[i]:
+                for url, d in self.buffers[i].items():
                     self.conn.send(url)
                     self.conn.send_bytes(d["eo_bytes"])
                     self.conn.send_bytes(d["am_bytes"])
