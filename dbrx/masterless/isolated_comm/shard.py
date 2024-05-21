@@ -280,20 +280,20 @@ class DistributedMoeBlock(nn.Module):
         inds = inds.tolist()
         jobs = self.design_jobs(inds, dense=False)  # CONFIGURABLE
 
-        tic = time.perf_counter_ns()
+        # tic = time.perf_counter_ns()
 
         expert_outs, arr_map = shard(x, jobs)
 
-        moe_lat = (time.perf_counter_ns() - tic) / 1000
-        LATENCIES["moe"].append(moe_lat)
-        logging.info(f"moe took {moe_lat} mu_s")
-        tic = time.perf_counter_ns()
+        # moe_lat = (time.perf_counter_ns() - tic) / 1000
+        # LATENCIES["moe"].append(moe_lat)
+        # logging.info(f"moe took {moe_lat} mu_s")
+        # tic = time.perf_counter_ns()
 
         shard_outs = self.dispatch_and_combine(expert_outs, arr_map, conn)
 
-        comm_3_lat = (time.perf_counter_ns() - tic) / 1000
-        LATENCIES["comm_3"].append(comm_3_lat)
-        logging.info(f"comm_3 took {comm_3_lat} mu_s")
+        # comm_3_lat = (time.perf_counter_ns() - tic) / 1000
+        # LATENCIES["comm_3"].append(comm_3_lat)
+        # logging.info(f"comm_3 took {comm_3_lat} mu_s")
 
         y = []
 
@@ -485,8 +485,8 @@ class Generator:
             prompt = self.conn.recv()
             max_tokens = self.conn.recv()
             res = self.generate(prompt, max_tokens, DEFAULT_TEMP)
-            logging.info(f"avg moe latency: {mean(LATENCIES['moe'][40:])} mu_s")
-            logging.info(f"avg comm_3 latency: {mean(LATENCIES['comm_3'][40:])} mu_s")
+            # logging.info(f"avg moe latency: {mean(LATENCIES['moe'][40:])} mu_s")
+            # logging.info(f"avg comm_3 latency: {mean(LATENCIES['comm_3'][40:])} mu_s")
             pprint.pp(res)
             self.conn.send(res)
 
@@ -558,27 +558,27 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
     async def all_dispatch(
         self, layer_num: int, oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub]
     ) -> tuple:
-        tic = time.perf_counter_ns()
+        # tic = time.perf_counter_ns()
 
         while not self.conn.poll():
             await asyncio.sleep(0)
 
-        comm_0_lat = (time.perf_counter_ns() - tic) / 1000
-        LATENCIES["comm_0"].append(comm_0_lat)
-        logging.info(f"comm_0 took {comm_0_lat} mu_s")
+        # comm_0_lat = (time.perf_counter_ns() - tic) / 1000
+        # LATENCIES["comm_0"].append(comm_0_lat)
+        # logging.info(f"comm_0 took {comm_0_lat} mu_s")
 
         a_bytes = self.conn.recv_bytes()
         am_bytes = self.conn.recv_bytes()
 
-        tic = time.perf_counter_ns()
+        # tic = time.perf_counter_ns()
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(self.send(shard, layer_num, a_bytes, am_bytes))
 
-        comm_1_lat = (time.perf_counter_ns() - tic) / 1000
-        LATENCIES["comm_1"].append(comm_1_lat)
-        logging.info(f"comm_1 took {comm_1_lat} mu_s")
+        # comm_1_lat = (time.perf_counter_ns() - tic) / 1000
+        # LATENCIES["comm_1"].append(comm_1_lat)
+        # logging.info(f"comm_1 took {comm_1_lat} mu_s")
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
         buffer = self.buffers[request.layer_num]
@@ -610,14 +610,14 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
             for _ in range(request.max_tokens):
                 for i in range(self.config["n_layers"]):
-                    tic = time.perf_counter_ns()
+                    # tic = time.perf_counter_ns()
 
                     await self.all_dispatch(i, oth_shards)
                     await self.sync_complete_events[i].wait()
 
-                    comm_2_lat = (time.perf_counter_ns() - tic) / 1000
-                    LATENCIES["comm_2"].append(comm_2_lat)
-                    logging.info(f"comm_2 took {comm_2_lat} mu_s")
+                    # comm_2_lat = (time.perf_counter_ns() - tic) / 1000
+                    # LATENCIES["comm_2"].append(comm_2_lat)
+                    # logging.info(f"comm_2 took {comm_2_lat} mu_s")
 
                     for url, d in self.buffers[i].items():
                         self.conn.send(url)
@@ -631,9 +631,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     break
 
         prompt_time, prompt_t_cnt, gen_time, gen_t_cnt, response = self.conn.recv()
-        logging.info(f"avg comm_0 latency: {mean(LATENCIES['comm_0'][40:])} mu_s")
-        logging.info(f"avg comm_1 latency: {mean(LATENCIES['comm_1'][40:])} mu_s")
-        logging.info(f"avg comm_2 latency: {mean(LATENCIES['comm_2'][40:])} mu_s")
+        # logging.info(f"avg comm_0 latency: {mean(LATENCIES['comm_0'][40:])} mu_s")
+        # logging.info(f"avg comm_1 latency: {mean(LATENCIES['comm_1'][40:])} mu_s")
+        # logging.info(f"avg comm_2 latency: {mean(LATENCIES['comm_2'][40:])} mu_s")
 
         return shard_envoy_pb2.UsrOuts(
             prompt_time=prompt_time,
