@@ -485,8 +485,8 @@ class Generator:
             prompt = self.conn.recv()
             max_tokens = self.conn.recv()
             res = self.generate(prompt, max_tokens, DEFAULT_TEMP)
-            logging.info(f"avg moe latency: {mean(LATENCIES['moe'])} mu_s")
-            logging.info(f"avg comm_3 latency: {mean(LATENCIES['comm_3'])} mu_s")
+            logging.info(f"avg moe latency: {mean(LATENCIES['moe'][40:])} mu_s")
+            logging.info(f"avg comm_3 latency: {mean(LATENCIES['comm_3'][40:])} mu_s")
             pprint.pp(res)
             self.conn.send(res)
 
@@ -561,7 +561,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         tic = time.perf_counter_ns()
 
         while not self.conn.poll():
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(0.0005)
 
         comm_0_lat = (time.perf_counter_ns() - tic) / 1000
         LATENCIES["comm_0"].append(comm_0_lat)
@@ -631,9 +631,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     break
 
         prompt_time, prompt_t_cnt, gen_time, gen_t_cnt, response = self.conn.recv()
-        logging.info(f"avg comm_0 latency: {mean(LATENCIES['comm_0'])} mu_s")
-        logging.info(f"avg comm_1 latency: {mean(LATENCIES['comm_1'])} mu_s")
-        logging.info(f"avg comm_2 latency: {mean(LATENCIES['comm_2'])} mu_s")
+        logging.info(f"avg comm_0 latency: {mean(LATENCIES['comm_0'][40:])} mu_s")
+        logging.info(f"avg comm_1 latency: {mean(LATENCIES['comm_1'][40:])} mu_s")
+        logging.info(f"avg comm_2 latency: {mean(LATENCIES['comm_2'][40:])} mu_s")
 
         return shard_envoy_pb2.UsrOuts(
             prompt_time=prompt_time,
