@@ -26,14 +26,14 @@ from transformers import AutoTokenizer
 from serialization_utils import mx_to_bytes, bytes_to_mx
 
 import pprint
-from statistics import mean
-LATENCIES = {
-    "moe": [],
-    "comm_0": [],
-    "comm_1": [],
-    "comm_2": [],
-    "comm_3": [],
-}
+# from statistics import mean
+# LATENCIES = {
+#     "moe": [],
+#     "comm_0": [],
+#     "comm_1": [],
+#     "comm_2": [],
+#     "comm_3": [],
+# }
 
 DEFAULT_TEMP = 0.6
 DEFAULT_SEED = 7
