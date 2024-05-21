@@ -34,6 +34,8 @@ async def call(
 
 
 async def start(config_path: str, prompt: str, max_tokens: int) -> None:
+    assert max_tokens > 0
+
     print("INFERENCE STARTED:")
     print(f"PROMPT: {prompt}")
 

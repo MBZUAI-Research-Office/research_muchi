@@ -349,7 +349,8 @@ class Generator:
         mx.random.seed(DEFAULT_SEED)
         self.model_path = Path(model_path)
         self.model_args = self.get_model_args(config_filename)
-        self.model = self.load_model(conn)
+        self.conn = conn
+        self.model = self.load_model(self.conn)
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path, trust_remote_code=True
         )
@@ -433,6 +434,7 @@ class Generator:
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
             if token == self.tokenizer.eos_token_id:
+                self.conn.send(False)
                 break
             tokens.append(token)
 
@@ -441,6 +443,8 @@ class Generator:
             if s[-1] == "\n":
                 tokens = []
                 token_strings.append(s)
+
+            self.conn.send(True)
 
         token_count = n + 1
         token_strings.append(
@@ -466,7 +470,6 @@ def shard_main(
     prompt = conn.recv()
     max_tokens = conn.recv()
     res = generator.generate(prompt, max_tokens, DEFAULT_TEMP)
-    print(res)
     conn.send(res)
 
 
@@ -567,20 +570,24 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 shard = shard_envoy_pb2_grpc.ShardEnvoyStub(channel)
                 oth_shards.append(shard)
 
-            for i in range(self.config["n_layers"]):
-                if i == 0:
-                    self.conn.send(request.prompt)
-                    self.conn.send(request.max_tokens)
+            self.conn.send(request.prompt)
+            self.conn.send(request.max_tokens)
 
-                await self.all_dispatch(i, oth_shards)
-                await self.sync_complete_events[i].wait()
+            for _ in range(request.max_tokens):
+                for i in range(self.config["n_layers"]):
+                    await self.all_dispatch(i, oth_shards)
+                    await self.sync_complete_events[i].wait()
 
-                for url, d in self.buffers[i].items():
-                    self.conn.send(url)
-                    self.conn.send_bytes(d["eo_bytes"])
-                    self.conn.send_bytes(d["am_bytes"])
+                    for url, d in self.buffers[i].items():
+                        self.conn.send(url)
+                        self.conn.send_bytes(d["eo_bytes"])
+                        self.conn.send_bytes(d["am_bytes"])
 
-                self.reset_buffer_mechanism(i)
+                    self.reset_buffer_mechanism(i)
+
+                continue_sig = self.conn.recv()
+                if not continue_sig:
+                    break
 
         prompt_time, prompt_t_cnt, gen_time, gen_t_cnt, response = self.conn.recv()
 
