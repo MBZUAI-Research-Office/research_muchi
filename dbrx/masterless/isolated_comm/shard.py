@@ -561,7 +561,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         tic = time.perf_counter_ns()
 
         while not self.conn.poll():
-            await asyncio.sleep(0.0001)
+            await asyncio.sleep(0.00005)
 
         comm_0_lat = (time.perf_counter_ns() - tic) / 1000
         LATENCIES["comm_0"].append(comm_0_lat)
