@@ -26,6 +26,14 @@ from transformers import AutoTokenizer
 from serialization_utils import mx_to_bytes, bytes_to_mx
 
 import pprint
+from statistics import mean
+LATENCIES = {
+    "moe": [],
+    "comm_0": [],
+    "comm_1": [],
+    "comm_2": [],
+    "comm_3": [],
+}
 
 DEFAULT_TEMP = 0.6
 DEFAULT_SEED = 7
@@ -277,12 +285,14 @@ class DistributedMoeBlock(nn.Module):
         expert_outs, arr_map = shard(x, jobs)
 
         moe_lat = (time.perf_counter_ns() - tic) / 1000
+        LATENCIES["moe"].append(moe_lat)
         logging.info(f"moe took {moe_lat} mu_s")
         tic = time.perf_counter_ns()
 
         shard_outs = self.dispatch_and_combine(expert_outs, arr_map, conn)
 
         comm_3_lat = (time.perf_counter_ns() - tic) / 1000
+        LATENCIES["comm_3"].append(comm_3_lat)
         logging.info(f"comm_3 took {comm_3_lat} mu_s")
 
         y = []
@@ -475,6 +485,8 @@ class Generator:
             prompt = self.conn.recv()
             max_tokens = self.conn.recv()
             res = self.generate(prompt, max_tokens, DEFAULT_TEMP)
+            logging.info(f"avg moe latency: {mean(LATENCIES["moe"])} mu_s")
+            logging.info(f"avg comm_3 latency: {mean(LATENCIES["comm_3"])} mu_s")
             pprint.pp(res)
             self.conn.send(res)
 
@@ -552,6 +564,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             await asyncio.sleep(0.001)
 
         comm_0_lat = (time.perf_counter_ns() - tic) / 1000
+        LATENCIES["comm_0"].append(comm_0_lat)
         logging.info(f"comm_0 took {comm_0_lat} mu_s")
 
         a_bytes = self.conn.recv_bytes()
@@ -564,6 +577,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 tg.create_task(self.send(shard, layer_num, a_bytes, am_bytes))
 
         comm_1_lat = (time.perf_counter_ns() - tic) / 1000
+        LATENCIES["comm_1"].append(comm_1_lat)
         logging.info(f"comm_1 took {comm_1_lat} mu_s")
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
@@ -602,6 +616,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     await self.sync_complete_events[i].wait()
 
                     comm_2_lat = (time.perf_counter_ns() - tic) / 1000
+                    LATENCIES["comm_2"].append(comm_2_lat)
                     logging.info(f"comm_2 took {comm_2_lat} mu_s")
 
                     for url, d in self.buffers[i].items():
@@ -616,6 +631,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     break
 
         prompt_time, prompt_t_cnt, gen_time, gen_t_cnt, response = self.conn.recv()
+        logging.info(f"avg comm_0 latency: {mean(LATENCIES["comm_0"])} mu_s")
+        logging.info(f"avg comm_1 latency: {mean(LATENCIES["comm_1"])} mu_s")
+        logging.info(f"avg comm_2 latency: {mean(LATENCIES["comm_2"])} mu_s")
 
         return shard_envoy_pb2.UsrOuts(
             prompt_time=prompt_time,
