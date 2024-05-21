@@ -534,7 +534,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         self, layer_num: int, oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub]
     ) -> tuple:
         while not self.conn.poll():
-            asyncio.sleep(0.001)
+            await asyncio.sleep(0.001)
         a_bytes = self.conn.recv_bytes()
         am_bytes = self.conn.recv_bytes()
 
