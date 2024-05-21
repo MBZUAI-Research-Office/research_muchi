@@ -268,7 +268,7 @@ class DistributedMoeBlock(nn.Module):
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs = self.design_jobs(inds, dense=True)  # CONFIGURABLE
+        jobs = self.design_jobs(inds, dense=False)  # CONFIGURABLE
 
         logging.info(f"started moe")
         tic = time.perf_counter_ns()
