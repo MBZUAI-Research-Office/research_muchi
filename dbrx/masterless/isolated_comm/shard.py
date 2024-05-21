@@ -457,17 +457,21 @@ class Generator:
             "".join(token_strings),
         )
 
+    def start(self) -> None:
+        while True:
+            prompt = self.conn.recv()
+            max_tokens = self.conn.recv()
+            res = self.generate(prompt, max_tokens, DEFAULT_TEMP)
+            self.conn.send(res)
+
 
 def shard_main(
     model_path: str, config_filename: str, conn: connection.Connection
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     generator = Generator(model_path, config_filename, conn)
+    generator.start()
     logging.info("generator ready")
-    prompt = conn.recv()
-    max_tokens = conn.recv()
-    res = generator.generate(prompt, max_tokens, DEFAULT_TEMP)
-    conn.send(res)
 
 
 class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
