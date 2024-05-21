@@ -470,8 +470,8 @@ def shard_main(
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     generator = Generator(model_path, config_filename, conn)
-    generator.start()
     logging.info("generator ready")
+    generator.start()
 
 
 class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
