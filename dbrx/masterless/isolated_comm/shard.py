@@ -198,14 +198,21 @@ class DistributedMoeBlock(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.d_model = args.d_model
-        self.shard_url = args.ffn_config["shard_url"]
+        self.my_url = args.ffn_config["shard_url"]
+        self.my_experts = args.ffn_config["shard_map"][self.my_url]
         self.n_oth_shards = len(args.ffn_config["shard_map"]) - 1
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
         self.expert_map = args.ffn_config["expert_map"]
         self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
-    def design_jobs(self, inds: list[list[int]]) -> list:
+    def design_jobs(self, inds: list[list[int]], dense: bool = False) -> list:
         jobs = []
+
+        if dense:
+            activated_experts = set(self.my_experts)
+            for _ in range(len(inds)):
+                jobs.append([activated_experts, 0])
+            return jobs
 
         for activated_experts in inds:
             job = [set(), 0]
@@ -213,7 +220,7 @@ class DistributedMoeBlock(nn.Module):
 
             for e in activated_experts:
                 url = self.expert_map[e]
-                if url == self.shard_url:
+                if url == self.my_url:
                     job[0].add(e)
                 shard_loads[url] = shard_loads.get(url, 0) + 1
 
@@ -229,7 +236,7 @@ class DistributedMoeBlock(nn.Module):
         conn: connection.Connection,
     ):
         shard_outs = {}
-        shard_outs[self.shard_url] = {"expert_outs": expert_outs, "arr_map": arr_map}
+        shard_outs[self.my_url] = {"expert_outs": expert_outs, "arr_map": arr_map}
         conn.send_bytes(mx_to_bytes(expert_outs))
         conn.send_bytes(pickle.dumps(arr_map))
 
@@ -261,7 +268,7 @@ class DistributedMoeBlock(nn.Module):
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs = self.design_jobs(inds)
+        jobs = self.design_jobs(inds, dense=True)  # CONFIGURABLE
 
         logging.info(f"started moe")
         tic = time.perf_counter_ns()
