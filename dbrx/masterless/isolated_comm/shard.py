@@ -276,12 +276,14 @@ class DistributedMoeBlock(nn.Module):
 
         expert_outs, arr_map = shard(x, jobs)
 
-        logging.info(f"moe took {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)")
+        moe_lat = (time.perf_counter_ns() - tic) / 1000
+        logging.info(f"moe took {moe_lat} mu_s")
         tic = time.perf_counter_ns()
 
         shard_outs = self.dispatch_and_combine(expert_outs, arr_map, conn)
 
-        logging.info(f"DnC took {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)")
+        comm_3_lat = (time.perf_counter_ns() - tic) / 1000
+        logging.info(f"comm_3 took {comm_3_lat} mu_s")
 
         y = []
 
@@ -544,8 +546,14 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
     async def all_dispatch(
         self, layer_num: int, oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub]
     ) -> tuple:
+        tic = time.perf_counter_ns()
+
         while not self.conn.poll():
             await asyncio.sleep(0.001)
+
+        comm_0_lat = (time.perf_counter_ns() - tic) / 1000
+        logging.info(f"comm_0 took {comm_0_lat} mu_s")
+
         a_bytes = self.conn.recv_bytes()
         am_bytes = self.conn.recv_bytes()
 
@@ -555,7 +563,8 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             for shard in oth_shards:
                 tg.create_task(self.send(shard, layer_num, a_bytes, am_bytes))
 
-        logging.info(f"D took {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)")
+        comm_1_lat = (time.perf_counter_ns() - tic) / 1000
+        logging.info(f"comm_1 took {comm_1_lat} mu_s")
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
         buffer = self.buffers[request.layer_num]
@@ -587,8 +596,13 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
             for _ in range(request.max_tokens):
                 for i in range(self.config["n_layers"]):
+                    tic = time.perf_counter_ns()
+
                     await self.all_dispatch(i, oth_shards)
                     await self.sync_complete_events[i].wait()
+
+                    comm_2_lat = (time.perf_counter_ns() - tic) / 1000
+                    logging.info(f"comm_2 took {comm_2_lat} mu_s")
 
                     for url, d in self.buffers[i].items():
                         self.conn.send(url)
