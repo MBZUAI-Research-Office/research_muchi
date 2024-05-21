@@ -1,0 +1,7 @@
+aiohttp
+aiodns
+Flask
+numpy
+Requests
+grpcio
+grpcio-tools

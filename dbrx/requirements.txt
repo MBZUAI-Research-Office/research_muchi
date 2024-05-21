@@ -1,0 +1,8 @@
+grpcio
+grpcio-tools
+numpy
+mlx
+transformers
+torch
+torchvision
+tiktoken

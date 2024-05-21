@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+service MoeShard {
+  rpc Execute (Inputs) returns (Outputs) {}
+}
+
+message Inputs {
+  int32 batch_size = 1;
+  bytes data = 2;
+}
+
+message Outputs {
+  bytes data = 1;
+}

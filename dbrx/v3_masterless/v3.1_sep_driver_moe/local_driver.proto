@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+service LocalDriver {
+  rpc Start (UsrInputs) returns (UsrOutputs) {}
+  rpc Receive (MoeShardOuts) returns (Empty) {}
+}
+
+message UsrInputs {
+  string prompt = 1;
+  int32 max_tokens = 2;
+}
+
+message UsrOutputs {
+  double prompt_time = 1;
+  int32 prompt_t_cnt = 2;
+  double gen_time = 3;
+  int32 gen_t_cnt = 4;
+  string response = 5;
+}
+
+message MoeShardOuts {
+  string url = 1;
+  int32 layer_num = 2;
+  bytes data = 3;
+  bytes arr_map = 4;
+}
+
+message Empty {}
