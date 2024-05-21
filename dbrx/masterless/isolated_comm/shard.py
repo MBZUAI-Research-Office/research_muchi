@@ -25,6 +25,8 @@ from transformers import AutoTokenizer
 
 from serialization_utils import mx_to_bytes, bytes_to_mx
 
+import pprint
+
 DEFAULT_TEMP = 0.6
 DEFAULT_SEED = 7
 
@@ -471,6 +473,7 @@ class Generator:
             prompt = self.conn.recv()
             max_tokens = self.conn.recv()
             res = self.generate(prompt, max_tokens, DEFAULT_TEMP)
+            pprint.pp(res)
             self.conn.send(res)
 
 
