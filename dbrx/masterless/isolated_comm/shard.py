@@ -268,7 +268,9 @@ class DistributedMoeBlock(nn.Module):
 
         expert_outs, arr_map = shard(x, jobs)
 
-        logging.info(f"ended moe in {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)")
+        logging.info(
+            f"ended moe in {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)"
+        )
         shard_outs = self.dispatch_and_combine(expert_outs, arr_map, conn)
         y = []
 
@@ -391,45 +393,40 @@ class Generator:
 
         return model
 
-    def generate_step(self, prompt: mx.array, temp: float):
-
-        def sample(logits: mx.array) -> Tuple[mx.array, float]:
-            softmax_logits = mx.softmax(logits)
-
-            if temp == 0:
-                token = mx.argmax(logits, axis=-1)
-            else:
-                token = mx.random.categorical(logits * (1 / temp))
-
-            prob = softmax_logits[0, token]
-            return token, prob
-
-        y = prompt
-        cache = None
-
-        while True:
-            logits, cache = self.model(y[None], cache=cache)
-            logits = logits[:, -1, :]
-            y, prob = sample(logits)
-            yield y, prob
-
     def generate(
         self,
         prompt: str,
         max_tokens: int,
         temp: float,
     ):
-        prompt_tokens = mx.array(self.tokenizer.encode(prompt))
 
-        tic = time.perf_counter()
+        def sample(logits: mx.array) -> Tuple[mx.array, float]:
+            # softmax_logits = mx.softmax(logits)
+
+            if temp == 0:
+                token = mx.argmax(logits, axis=-1)
+            else:
+                token = mx.random.categorical(logits * (1 / temp))
+
+            # prob = softmax_logits[0, token]
+            # return token, prob
+            return token
+
+        prompt_tokens = mx.array(self.tokenizer.encode(prompt))
+        y = prompt_tokens
+        cache = None
         tokens = []
         token_strings = []
         REPLACEMENT_CHAR = "\ufffd"
 
-        for (token, prob), n in zip(
-            self.generate_step(prompt_tokens, temp), range(max_tokens)
-        ):
-            token = token.item()  # get word ID
+        tic = time.perf_counter()
+
+        for n in range(max_tokens):
+            logits, cache = self.model(y[None], cache=cache)
+            logits = logits[:, -1, :]
+            y = sample(logits)
+
+            token = y.item()  # get word ID
             if n == 0:
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
@@ -531,7 +528,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             )
         )
 
-        logging.info(f"ended sending in {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)")
+        logging.info(
+            f"ended sending in {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)"
+        )
 
     async def all_dispatch(
         self, layer_num: int, oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub]
