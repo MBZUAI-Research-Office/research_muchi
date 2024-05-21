@@ -263,7 +263,12 @@ class DistributedMoeBlock(nn.Module):
         inds = inds.tolist()
         jobs = self.design_jobs(inds)
 
+        print("started moe", flush=True)
+        tic = time.perf_counter()
+
         expert_outs, arr_map = shard(x, jobs)
+
+        print(f"ended moe, took {time.perf_counter() - tic} sec(s)", flush=True)
         shard_outs = self.dispatch_and_combine(expert_outs, arr_map, conn)
         y = []
 
@@ -457,9 +462,11 @@ def shard_main(
 ) -> None:
     logging.basicConfig(level=logging.INFO)
     generator = Generator(model_path, config_filename, conn)
+    logging.info("generator ready")
     prompt = conn.recv()
     max_tokens = conn.recv()
     res = generator.generate(prompt, max_tokens, DEFAULT_TEMP)
+    print(res)
     conn.send(res)
 
 
@@ -509,7 +516,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         a_bytes: bytes,
         am_bytes: bytes,
     ):
-        await shard.Receive(
+        return await shard.Receive(
             shard_envoy_pb2.ShardOuts(
                 url=self.config["url"],
                 layer_num=layer_num,
@@ -521,20 +528,30 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
     async def all_dispatch(
         self, layer_num: int, oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub]
     ) -> tuple:
+        while not self.conn.poll(0.001):
+            pass
         a_bytes = self.conn.recv_bytes()
         am_bytes = self.conn.recv_bytes()
+
+        print("started dispatch", flush=True)
+        tic = time.perf_counter()
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(self.send(shard, layer_num, a_bytes, am_bytes))
 
+        print(f"ended dispatch, took {time.perf_counter() - tic} sec(s)", flush=True)
+
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
+        print(f"started receiving from {request.url}", flush=True)
+
         buffer = self.buffers[request.layer_num]
         buffer[request.url] = {"eo_bytes": request.data, "am_bytes": request.arr_map}
 
         if len(buffer) == len(self.config["oth_urls"]):
             self.sync_complete_events[request.layer_num].set()
 
+        print(f"ended receiving from {request.url}", flush=True)
         return shard_envoy_pb2.Empty()
 
     async def Start(self, request: shard_envoy_pb2.UsrIns, context) -> None:
