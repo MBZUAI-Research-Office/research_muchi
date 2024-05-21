@@ -270,15 +270,17 @@ class DistributedMoeBlock(nn.Module):
         inds = inds.tolist()
         jobs = self.design_jobs(inds, dense=False)  # CONFIGURABLE
 
-        logging.info(f"started moe")
         tic = time.perf_counter_ns()
 
         expert_outs, arr_map = shard(x, jobs)
 
-        logging.info(
-            f"ended moe in {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)"
-        )
+        logging.info(f"moe took {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)")
+        tic = time.perf_counter_ns()
+
         shard_outs = self.dispatch_and_combine(expert_outs, arr_map, conn)
+
+        logging.info(f"DnC took {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)")
+
         y = []
 
         for bi, st, it in zip(range(x.shape[0]), scores, inds):
@@ -527,9 +529,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         a_bytes: bytes,
         am_bytes: bytes,
     ):
-        logging.info(f"sending")
-        tic = time.perf_counter_ns()
-
         await shard.Receive(
             shard_envoy_pb2.ShardOuts(
                 url=self.config["url"],
@@ -537,10 +536,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 data=a_bytes,
                 arr_map=am_bytes,
             )
-        )
-
-        logging.info(
-            f"ended sending in {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)"
         )
 
     async def all_dispatch(
@@ -551,9 +546,13 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         a_bytes = self.conn.recv_bytes()
         am_bytes = self.conn.recv_bytes()
 
+        tic = time.perf_counter_ns()
+
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(self.send(shard, layer_num, a_bytes, am_bytes))
+
+        logging.info(f"D took {(time.perf_counter_ns() - tic) / 1000} micro-sec(s)")
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
         buffer = self.buffers[request.layer_num]
