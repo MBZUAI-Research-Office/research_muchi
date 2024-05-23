@@ -754,7 +754,7 @@ async def serve(
     logging.info(f"server started, listening on {listen_addr}")
 
     conn.recv()  # wait for Generator to finish initializing before starting to warm up
-    servicer.start()
+    await servicer.start()
 
     # copied from:
     # https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
