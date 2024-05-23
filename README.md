@@ -7,6 +7,7 @@ https://docs.google.com/presentation/d/1S0uQ6G4PuXBWq8a2PRFdHHnBS1VnjT0ysbEE6eEx
 ### by:
 
 - muchichen@ntu.edu.tw
+- pohsuan.huang@mbzuai.ac.ae
 - xiangrui.ke@mbzuai.ac.ae
 
 ### supervisor:
