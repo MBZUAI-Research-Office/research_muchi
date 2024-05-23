@@ -652,6 +652,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         return shard_envoy_pb2.Empty()
 
     async def Generate(self, request: shard_envoy_pb2.UsrIns, context):
+        logging.info(f"received generation request")
         job = {"req": request, "completed": asyncio.Event()}
         self.gen_queue.append(job)
         await job["completed"].wait()
@@ -690,15 +691,16 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             while True:
                 if len(self.gen_queue) == 0 or DEFAULT_STARTUP_WARMING_PERIOD > 0:
 
-                    stay_warm(self.config["n_layers"], oth_shards, before_warming=True)
+                    await stay_warm(self.config["n_layers"], oth_shards, before_warming=True)
+                    logging.info(f"warming...")
                     self.conn.send(False)  # signal Generator that this is a warming run
 
                     for i in range(self.config["n_layers"]):
-                        stay_warm(i, oth_shards)
+                        await stay_warm(i, oth_shards)
 
                     DEFAULT_STARTUP_WARMING_PERIOD -= 1
                     if DEFAULT_STARTUP_WARMING_PERIOD == 0:
-                        logging.info(f"startup warming completed")
+                        logging.info(f"completed startup warming")
 
                     continue
 
@@ -731,6 +733,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 gen["resp"] = self.conn.recv()
                 gen["completed"].set()
+                self.gen_queue.popleft()
 
                 # logging.info(f"avg comm_0 latency: {mean(LATENCIES['comm_0'][40:])} mu_s")
                 # logging.info(f"avg comm_1 latency: {mean(LATENCIES['comm_1'][40:])} mu_s")
