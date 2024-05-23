@@ -373,7 +373,7 @@ class Warmer:
         self.moe_shard = moe_shard
         self.conn = conn
 
-        self.x = mx.ones((args.d_model,), dtype=mx.bfloat16)
+        self.x = mx.ones((1, args.d_model), dtype=mx.bfloat16)
         self.jobs = self.design_jobs(
             args.ffn_config["shard_map"][args.ffn_config["shard_url"]]
         )
