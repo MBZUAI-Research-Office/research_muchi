@@ -384,7 +384,7 @@ class Warmer:
 
     def sync_wth_oths(self):
         self.conn.send(True)  # signals that I am ready
-        self.conn.recv()  # confirms that everyone else is ready
+        self.conn.recv()  # confirms that everyone else is done
 
     def __call__(self):
         # warms moe_shard for 1 token
@@ -672,6 +672,8 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             await self.broadcast_im_ready(i, oth_shards, before_warming)
             await self.sync_complete_events[i].wait()
             self.reset_buffer_mechanism(i)
+            if not before_warming:
+                self.conn.send(True) # signals warmer that this layer is done
 
         async with AsyncExitStack() as es:
             oth_shards = []
