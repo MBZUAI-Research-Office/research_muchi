@@ -171,17 +171,14 @@ class MoeShard:
             y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
             dst.append(y)
 
-        blocks = []
+        block = []
         for i, e in enumerate(self.experts):
-            if i % 4 == 0:
-                blocks.append([])
-
             v1, w1, w2 = next(self.experts[e]["generator"])
-            mlp(x, v1, w1, w2, blocks[-1])
+            mlp(x, v1, w1, w2, block)
 
             if (i + 1) % 4 == 0:
-                blocks[-1] = mx.stack(blocks[-1], axis=0)
-        mx.eval(blocks)
+                mx.eval(mx.stack(block, axis=0))
+                block = []
 
     def __call__(self, inputs: mx.array, jobs: list) -> tuple[mx.array, dict]:
         # sample jobs:
