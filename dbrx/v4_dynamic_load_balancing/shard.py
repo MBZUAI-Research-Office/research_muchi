@@ -363,7 +363,7 @@ class Warmer:
         mx.eval(self.x)
 
     def design_jobs(self, my_experts: list) -> list:
-        return [[set(my_experts), 0]]
+        return [[set(my_experts[:4]), 0]]
 
     def sync_wth_oths(self):
         self.conn.send(True)  # signals that I am ready
