@@ -166,6 +166,23 @@ class MoeShard:
         for e in self.experts:
             self.experts[e]["generator"] = self.get_expert_generator(e)
 
+    def warm(self, x: mx.array) -> None:
+        def mlp(x, v1, w1, w2, dst):
+            y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
+            dst.append(y)
+
+        blocks = []
+        for i, e in enumerate(self.experts):
+            if i % 4 == 0:
+                blocks.append([])
+
+            v1, w1, w2 = next(self.experts[e]["generator"])
+            mlp(x, v1, w1, w2, blocks[-1])
+
+            if (i + 1) % 4 == 0:
+                blocks[-1] = mx.stack(blocks[-1], axis=0)
+        mx.eval(blocks)
+
     def __call__(self, inputs: mx.array, jobs: list) -> tuple[mx.array, dict]:
         # sample jobs:
         # [[{14}, 1], [{}, 2]]
@@ -358,12 +375,13 @@ class Warmer:
         self.moe_shard = moe_shard
         self.conn = conn
 
-        self.x = mx.ones((1, args.d_model), dtype=mx.bfloat16)
-        self.jobs = self.design_jobs(args.ffn_config["assigned_experts"])
+        self.x = mx.ones((args.d_model,), dtype=mx.bfloat16)
+        # self.x = mx.ones((1, args.d_model), dtype=mx.bfloat16)
+        # self.jobs = self.design_jobs(args.ffn_config["assigned_experts"])
         mx.eval(self.x)
 
-    def design_jobs(self, my_experts: list) -> list:
-        return [[set(my_experts), 0]]
+    # def design_jobs(self, my_experts: list) -> list:
+    #     return [[set(my_experts), 0]]
 
     def sync_wth_oths(self):
         self.conn.send(True)  # signals that I am ready
@@ -373,7 +391,8 @@ class Warmer:
         # warms moe_shard for 1 token
         self.moe_shard.reset_expert_generators()
         for _ in range(self.n_layers):
-            self.moe_shard(self.x, self.jobs)
+            # self.moe_shard(self.x, self.jobs)
+            self.moe_shard.warm(self.x)
             self.sync_wth_oths()
 
 
