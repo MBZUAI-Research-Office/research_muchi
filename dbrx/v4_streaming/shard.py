@@ -291,8 +291,8 @@ class DistributedMoeBlock(nn.Module):
         batch_size = x.shape[0]
         shard_outs = {}
 
-        for bi in range(batch_size):
-            expert_outs, arr_map = shard(x, jobs[bi], bool(bi > 0))
+        for bi, xt in enumerate(x):
+            expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
             self.all_dispatch(expert_outs, arr_map, shard_outs, conn)
 
         self.all_combine(batch_size, shard_outs, conn)
