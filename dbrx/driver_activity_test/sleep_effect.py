@@ -129,17 +129,16 @@ def main():
         if i % 40 == 0:
             shard.reset_expert_generators()
 
-        tic = time.perf_counter()
+        tic = time.perf_counter_ns()
 
         shard(xs, jobss[i])
 
-        latency = time.perf_counter() - tic
+        latency = time.perf_counter_ns() - tic
         latencies.append(latency)
-        print(f"finished layer {i}, jobs: {jobss[i]}, in {latency} sec(s)", flush=True)
+        print(f"finished layer {i} in {round(latency / 1000, 3)} mu_s", flush=True)
         # time.sleep(1)
 
-    # pprint.pp(latencies)
-    print(f"AVG latency: {mean(latencies)} sec(s)")
+    print(f"AVG latency: {round(mean(latencies[5:]) / 1000, 3)} mu_s")
 
 
 if __name__ == "__main__":
