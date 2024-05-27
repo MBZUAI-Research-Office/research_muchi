@@ -599,7 +599,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
     async def all_dispatch(self, oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub]):
 
         async def send(shard, data, metadata):
-            await shard.Receive(shard_envoy_pb2.ShardOuts(data=data, arr_map=metadata))
+            await shard.Receive(shard_envoy_pb2.ShardOuts(data=data, metadata=metadata))
 
         while not self.conn.poll():
             await asyncio.sleep(0)
