@@ -178,10 +178,10 @@ class MoeShard:
             self.experts[e]["generator"] = self.get_expert_generator(e)
 
     def __call__(
-        self, x: mx.array, job: tuple, use_cache: bool
+        self, x: mx.array, job: list, use_cache: bool
     ) -> tuple[mx.array, dict]:
         # sample job:
-        # ({14}, 1)
+        # [{14}, 1]
         # job[0] indicates activated experts in this shard for x
         # job[1] indicates num additional calculations needed to avoid
         # wire memory driver activity from surfacing
@@ -229,16 +229,17 @@ class DistributedMoeBlock(nn.Module):
         jobs = []
 
         for activated_experts in inds:
-            job = set()
+            job = [set(), 0]
             shard_loads = {}
 
             for e in activated_experts:
                 url = self.expert_map[e]
                 if url == self.url:
-                    job.add(e)
+                    job[0].add(e)
                 shard_loads[url] = shard_loads.get(url, 0) + 1
 
-            jobs.append((job, max(shard_loads.values()) - len(job)))
+            job[1] = max(shard_loads.values()) - len(job[0])
+            jobs.append(job)
 
         return jobs
 
