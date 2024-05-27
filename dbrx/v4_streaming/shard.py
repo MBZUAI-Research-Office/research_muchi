@@ -360,7 +360,8 @@ class DBRX(nn.Module):
         if cache is None:
             cache = [None] * len(self.blocks)
 
-        self.conn.send(h.shape[0])  # let envoy know the batch size
+        # h.shape = (sample_size, sequence_length, d_model)
+        self.conn.send(h.shape[0] * T)  # let envoy know the batch size
         self.moe_shard.reset_expert_generators()
 
         for e, layer in enumerate(self.blocks):
