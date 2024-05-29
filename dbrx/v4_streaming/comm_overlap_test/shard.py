@@ -40,11 +40,11 @@ class Generator:
             self.conn.send_bytes(self.x_bytes)
 
 
-def shard_main(conn: connection.Connection, batch_size: int) -> None:
+def shard_main(conn: connection.Connection) -> None:
     logging.basicConfig(level=logging.INFO)
     generator = Generator(conn)
     logging.info("generator ready")
-    conn.recv() # confirm that everyone is good to go
+    batch_size = conn.recv() # confirm that everyone is good to go
     generator.start(batch_size)
 
 
@@ -175,7 +175,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 concurrent.futures.wait(self.broadcast_im_ready(executor, oth_shards))
                 await self.buffer.get_is_full_signal(-1).wait()
-                self.conn.send(True) # signal generator to start working
+                self.conn.send(request.batch_size) # signal generator to start working
 
                 for bi in range(request.batch_size):
                     self.all_dispatch(bi, 0, executor, oth_shards)
@@ -235,9 +235,7 @@ if __name__ == "__main__":
         target=envoy_main,
         args=(args.port, args.model_path, args.config_filename, envoy_conn),
     )
-    shard_p = multiprocessing.Process(
-        target=shard_main, args=(args.model_path, args.config_filename, shard_conn)
-    )
+    shard_p = multiprocessing.Process(target=shard_main, args=(shard_conn,))
 
     envoy_p.start()
     shard_p.start()
