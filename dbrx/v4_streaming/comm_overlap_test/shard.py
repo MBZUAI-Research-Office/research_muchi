@@ -131,7 +131,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             fut.add_done_callback(when_done)
 
     def SignalReady(self, request, context):
-        logging.info("received signal")
         self.buffer.put(True, -1)
         return shard_envoy_pb2.Empty()
 
