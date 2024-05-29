@@ -150,7 +150,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             oth_shards = {}
             for url in self.config["oth_urls"]:
                 channel = es.enter_context(
-                    grpc.aio.insecure_channel(
+                    grpc.insecure_channel(
                         url,
                         options=[
                             ("grpc.max_send_message_length", -1),
