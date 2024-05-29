@@ -20,11 +20,6 @@ import mlx.core as mx
 
 from serialization_utils import mx_to_bytes
 
-# coroutines to be invoked when the event loop is shutting down
-# copied from:
-# https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
-_cleanup_coroutines = []
-
 
 class Generator:
 
@@ -169,14 +164,14 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             with futures.ThreadPoolExecutor() as executor:
 
                 futures.wait(self.broadcast_im_ready(executor, oth_shards))
-                self.buffer.get(-1) # block until everyone is ready
+                self.buffer.get(-1)  # block until everyone is ready
                 self.conn.send(request.batch_size)  # signal generator to start working
 
                 for bi in range(request.batch_size):
                     self.all_dispatch(bi, 0, executor, oth_shards)
 
 
-async def envoy_main(
+def envoy_main(
     port: int, model_path: str, config_filename: str, conn: connection.Connection
 ):
     logging.basicConfig(level=logging.INFO)
