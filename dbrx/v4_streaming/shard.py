@@ -253,6 +253,7 @@ class DistributedMoeBlock(nn.Module):
         shard_outs.setdefault(self.url, []).append((expert_outs, arr_map))
         conn.send_bytes(mx_to_bytes(expert_outs))
         conn.send_bytes(pickle.dumps((self.url, self.layer_num, arr_map)))
+        logging.info("finished sending expert outs to envoy")
 
     def all_combine(
         self,
@@ -292,7 +293,9 @@ class DistributedMoeBlock(nn.Module):
         shard_outs = {}
 
         for bi, xt in enumerate(x):
+            logging.info(f"at bi {bi}, xt shape: {xt.shape}")
             expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
+            logging.info(f"finished moe")
             self.all_dispatch(expert_outs, arr_map, shard_outs, conn)
 
         self.all_combine(batch_size, shard_outs, conn)
@@ -622,6 +625,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         return shard_envoy_pb2.Empty()
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
+        logging.info(f"started receiving")
         url, layer_num, arr_map = pickle.loads(request.metadata)
         buffer = self.buffers[layer_num]
         buffer.setdefault(url, []).append((request.data, request.metadata))
@@ -634,6 +638,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         if completed_cnt == len(self.config["oth_urls"]):
             self.sync_complete_events[layer_num].set()
 
+        logging.info(f"finished receiving")
         return shard_envoy_pb2.Empty()
 
     async def Generate(self, request: shard_envoy_pb2.UsrIns, context):
@@ -699,10 +704,12 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 for _ in range(gen["req"].max_tokens):
                     self.batch_size = self.conn.recv()
+                    logging.info(f"batch size is {self.batch_size}")
 
                     for li in range(self.config["n_layers"]):
                         for _bi in range(self.batch_size):
                             await self.all_dispatch(oth_shards)
+                            logging.info(f"finished dispatching")
 
                         await self.sync_complete_events[li].wait()
 
