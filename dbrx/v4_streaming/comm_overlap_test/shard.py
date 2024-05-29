@@ -113,9 +113,12 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
     def broadcast_im_ready(
         self, executor: concurrent.futures.Executor, oth_shards: dict
     ):
+        def signal(shard):
+            shard.SignalReady(shard_envoy_pb2.Empty())
+
         fs = []
         for shard in oth_shards.values():
-            fut = executor.submit(shard.SignalReady, shard_envoy_pb2.Empty())
+            fut = executor.submit(signal, shard)
             fs.append(fut)
         return fs
 
@@ -142,6 +145,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             fut.add_done_callback(when_done)
 
     def SignalReady(self, request, context):
+        logging.info("received signal")
         self.buffer.put(True, -1)
         return shard_envoy_pb2.Empty()
 
@@ -175,6 +179,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 concurrent.futures.wait(self.broadcast_im_ready(executor, oth_shards))
                 await self.buffer.get_is_full_signal(-1).wait()
+                logging.info("everyone is ready")
                 self.conn.send(request.batch_size) # signal generator to start working
 
                 for bi in range(request.batch_size):
