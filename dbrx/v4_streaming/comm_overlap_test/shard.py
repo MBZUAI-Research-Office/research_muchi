@@ -136,16 +136,13 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         return shard_envoy_pb2.Empty()
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
-        logging.info(f"started receiving")
-
         url, bi, li = pickle.loads(request.metadata)
         self.buffer.put((request.data, request.metadata), bi * li)
-
-        logging.info(f"finished receiving")
         return shard_envoy_pb2.Empty()
 
     def Start(self, request: shard_envoy_pb2.TestIns, context):
         self.buffer.set_up(request.batch_size, for_warming=True)
+
         with ExitStack() as es:
             oth_shards = {}
             for url in self.config["oth_urls"]:
@@ -169,6 +166,8 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 for bi in range(request.batch_size):
                     self.all_dispatch(bi, 0, executor, oth_shards)
+
+        return shard_envoy_pb2.Empty()
 
 
 def envoy_main(
