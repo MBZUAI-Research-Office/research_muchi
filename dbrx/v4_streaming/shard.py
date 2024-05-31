@@ -643,6 +643,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         global DEFAULT_STARTUP_WARMING_PERIOD
 
         with ExitStack() as es:
+            executor = es.enter_context(futures.ThreadPoolExecutor())
             oth_shards = {}
             for url in self.config["oth_urls"]:
                 channel = es.enter_context(
@@ -657,53 +658,52 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 shard = shard_envoy_pb2_grpc.ShardEnvoyStub(channel)
                 oth_shards[url] = shard
 
-            with futures.ThreadPoolExecutor() as executor:
-                while True:
-                    if len(self.gen_queue) == 0 or DEFAULT_STARTUP_WARMING_PERIOD > 0:
-                        self.sync_w_oths(executor, oth_shards, before_warming=True)
-                        logging.info(f"warming...")
-                        self.conn.send(False)  # signal Generator that this is a warming run
+            while True:
+                if len(self.gen_queue) == 0 or DEFAULT_STARTUP_WARMING_PERIOD > 0:
+                    self.sync_w_oths(executor, oth_shards, before_warming=True)
+                    logging.info(f"warming...")
+                    self.conn.send(False)  # signal Generator that this is a warming run
 
-                        for i in range(self.config["n_layers"]):
-                            self.sync_w_oths(executor, oth_shards, layer_num=i)
-                            self.conn.send(True)  # signals warmer that this layer is done
+                    for i in range(self.config["n_layers"]):
+                        self.sync_w_oths(executor, oth_shards, layer_num=i)
+                        self.conn.send(True)  # signals warmer that this layer is done
 
-                        DEFAULT_STARTUP_WARMING_PERIOD -= 1
-                        if DEFAULT_STARTUP_WARMING_PERIOD == 0:
-                            logging.info(f"completed startup warming")
+                    DEFAULT_STARTUP_WARMING_PERIOD -= 1
+                    if DEFAULT_STARTUP_WARMING_PERIOD == 0:
+                        logging.info(f"completed startup warming")
 
-                        continue
+                    continue
 
-                    self.conn.send(True)  # signal Generator that this is a generate run
-                    gen = self.gen_queue[0]
-                    self.conn.send(gen["req"].prompt)
-                    self.conn.send(gen["req"].max_tokens)
+                self.conn.send(True)  # signal Generator that this is a generate run
+                gen = self.gen_queue[0]
+                self.conn.send(gen["req"].prompt)
+                self.conn.send(gen["req"].max_tokens)
 
-                    for _ in range(gen["req"].max_tokens):
-                        batch_size = self.conn.recv()
-                        for li in range(self.config["n_layers"]):
-                            fut_to_task = {}
-                            for bi in range(batch_size):
-                                self.all_dispatch(executor, oth_shards, fut_to_task)
-                                fut_to_task[
-                                    executor.submit(self.buffer.wait_until_full, li, bi)
-                                ] = 1
+                for _ in range(gen["req"].max_tokens):
+                    batch_size = self.conn.recv()
+                    for li in range(self.config["n_layers"]):
+                        fut_to_task = {}
+                        for bi in range(batch_size):
+                            self.all_dispatch(executor, oth_shards, fut_to_task)
+                            fut_to_task[
+                                executor.submit(self.buffer.wait_until_full, li, bi)
+                            ] = 1
 
-                            for fut in futures.as_completed(fut_to_task):
-                                if fut_to_task[fut] == 0:
-                                    continue
-                                for data, metadata in fut.result():
-                                    self.conn.send_bytes(data)
-                                    self.conn.send_bytes(metadata)
+                        for fut in futures.as_completed(fut_to_task):
+                            if fut_to_task[fut] == 0:
+                                continue
+                            for data, metadata in fut.result():
+                                self.conn.send_bytes(data)
+                                self.conn.send_bytes(metadata)
 
-                            self.buffer.reset(li)
+                        self.buffer.reset(li)
 
-                        continue_sig = self.conn.recv()
-                        if not continue_sig:
-                            break
+                    continue_sig = self.conn.recv()
+                    if not continue_sig:
+                        break
 
-                    gen["resp"] = self.conn.recv()
-                    self.gen_queue.popleft()
+                gen["resp"] = self.conn.recv()
+                self.gen_queue.popleft()
 
 
 def envoy_main(
