@@ -1,9 +1,9 @@
 syntax = "proto3";
 
 service ShardEnvoy {
+  rpc SignalReady (Identifier) returns (Empty) {}
   rpc Generate (UsrIns) returns (UsrOuts) {}
   rpc Receive (ShardOuts) returns (Empty) {}
-  rpc WarmingSync (Identifier) returns (Empty) {}
 }
 
 message UsrIns {
@@ -27,6 +27,5 @@ message ShardOuts {
 message Empty {}
 
 message Identifier {
-  string url = 1;
-  int32 layer_num = 2;
+  int32 layer_num = 1;
 }

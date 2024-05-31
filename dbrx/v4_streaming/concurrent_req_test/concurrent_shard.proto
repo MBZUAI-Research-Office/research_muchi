@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+service ConcurrentShard {
+  rpc Start (TestIns) returns (Empty) {}
+}
+
+message TestIns {
+  int32 secs = 1;
+}
+
+message Empty {}
