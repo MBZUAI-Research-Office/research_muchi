@@ -38,9 +38,9 @@ def shard_main(conn: connection.Connection) -> None:
     logging.basicConfig(level=logging.INFO)
     generator = Generator(conn)
     logging.info("generator ready")
-    batch_size = conn.recv()  # confirm that everyone is good to go
-    generator.start(batch_size)
-
+    while True:
+        batch_size = conn.recv()  # confirm that everyone is good to go
+        generator.start(batch_size)
 
 class Buffer:
 
@@ -188,6 +188,7 @@ def envoy_main(
     server.start()
     logging.info(f"server started, listening on {listen_addr}")
     server.wait_for_termination()
+    conn.close()
 
 
 if __name__ == "__main__":
