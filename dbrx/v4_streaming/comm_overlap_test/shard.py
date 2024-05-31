@@ -114,21 +114,16 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         li: int,
         executor: futures.Executor,
         oth_shards: dict,
+        fs: list,
     ) -> None:
-
-        def send(url, shard, data, metadata):
-            shard.Receive(shard_envoy_pb2.ShardOuts(data=data, metadata=metadata))
-            return url, bi, li
-
-        def when_done(fut):
-            logging.info(f"{fut.result()} is done")
-
         data = self.conn.recv_bytes()
         metadata = pickle.dumps((self.config["url"], bi, li))
 
-        for url, shard in oth_shards.items():
-            fut = executor.submit(send, url, shard, data, metadata)
-            fut.add_done_callback(when_done)
+        for shard in oth_shards.values():
+            fut = executor.submit(
+                shard.Receive, shard_envoy_pb2.ShardOuts(data=data, metadata=metadata)
+            )
+            fs.append(fut)
 
     def SignalReady(self, request, context):
         self.buffer.put(True, -1)
@@ -163,8 +158,13 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 self.buffer.get(-1)  # block until everyone is ready
                 self.conn.send(request.batch_size)  # signal generator to start working
 
+                fs = []
                 for bi in range(request.batch_size):
-                    self.all_dispatch(bi, 0, executor, oth_shards)
+                    self.all_dispatch(bi, 0, executor, oth_shards, fs)
+
+                tic = time.perf_counter()
+                futures.wait(fs)
+                logging.info(f"dispatching took {time.perf_counter() - tic} sec(s)")
 
         return shard_envoy_pb2.Empty()
 
