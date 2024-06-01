@@ -253,8 +253,8 @@ class DistributedMoeBlock(nn.Module):
     ):
         for _ in range(batch_size * self.n_oth_shards):
             expert_outs = bytes_to_mx(conn.recv_bytes())
-            metadata = pickle.loads(conn.recv_bytes())
-            shard_outs.setdefault(metadata[0], []).append((expert_outs, metadata[3]))
+            url, li, bi, arr_map = pickle.loads(conn.recv_bytes())
+            shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
 
     def __call__(
         self,
@@ -290,7 +290,8 @@ class DistributedMoeBlock(nn.Module):
         for bi, st, it in zip(range(batch_size), scores, inds):
             yt = []
             for e in it:
-                expert_outs, arr_map = shard_outs[self.expert_map[e]][bi]
+                url = self.expert_map[e]
+                expert_outs, arr_map = shard_outs[url][bi]
                 yt.append(expert_outs[arr_map[e]])
 
             yt = mx.stack(yt, axis=-1)
