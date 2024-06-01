@@ -543,7 +543,7 @@ class DataBuffer:
         self.data[li].setdefault(bi, []).append(d)
 
     async def wait_til_full(self, li: int, bi: int = 0) -> list[Any]:
-        while len(self.data[li][bi]) != self.n_oth_shards:
+        while (bi not in self.data[li]) or (len(self.data[li][bi]) != self.n_oth_shards):
             await asyncio.sleep(0)
         return self.data[li][bi]
 
