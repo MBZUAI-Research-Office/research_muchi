@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+service ShardEnvoy {
+  rpc SignalReady (Identifier) returns (Empty) {}
+  rpc Generate (UsrIns) returns (UsrOuts) {}
+  rpc Receive (ShardOuts) returns (Empty) {}
+}
+
+message UsrIns {
+  string prompt = 1;
+  int32 max_tokens = 2;
+}
+
+message UsrOuts {
+  double prompt_time = 1;
+  int32 prompt_t_cnt = 2;
+  double gen_time = 3;
+  int32 gen_t_cnt = 4;
+  string response = 5;
+}
+
+message ShardOuts {
+  bytes data = 1;
+  bytes metadata = 2;
+}
+
+message Empty {}
+
+message Identifier {
+  int32 li = 1;
+}
