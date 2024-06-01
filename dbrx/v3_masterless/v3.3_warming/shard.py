@@ -28,14 +28,14 @@ from serialization_utils import mx_to_bytes, bytes_to_mx
 
 import pprint
 
-from statistics import mean
-LATENCIES = {
-    "moe": [],
-    "comm_0": [],
-    "comm_1": [],
-    "comm_2": [],
-    "comm_3": [],
-}
+# from statistics import mean
+# LATENCIES = {
+#     "moe": [],
+#     "comm_0": [],
+#     "comm_1": [],
+#     "comm_2": [],
+#     "comm_3": [],
+# }
 
 DEFAULT_TEMP = 0.6
 DEFAULT_SEED = 7
@@ -624,14 +624,14 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         a_bytes = self.conn.recv_bytes()
         am_bytes = self.conn.recv_bytes()
 
-        tic = time.perf_counter_ns()
+        # tic = time.perf_counter_ns()
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(send(shard, a_bytes, am_bytes))
 
-        comm_1_lat = (time.perf_counter_ns() - tic) / 1000
-        LATENCIES["comm_1"].append(comm_1_lat)
+        # comm_1_lat = (time.perf_counter_ns() - tic) / 1000
+        # LATENCIES["comm_1"].append(comm_1_lat)
         # logging.info(f"comm_1 took {comm_1_lat} mu_s")
 
     def signal_if_sync_completed(self, i: int):
@@ -738,7 +738,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 self.gen_queue.popleft()
 
                 # logging.info(f"avg comm_0 latency: {mean(LATENCIES['comm_0'][40:])} mu_s")
-                logging.info(f"avg comm_1 latency: {mean(LATENCIES['comm_1'][40:])} mu_s")
+                # logging.info(f"avg comm_1 latency: {mean(LATENCIES['comm_1'][40:])} mu_s")
                 # logging.info(f"avg comm_2 latency: {mean(LATENCIES['comm_2'][40:])} mu_s")
 
 
