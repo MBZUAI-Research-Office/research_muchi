@@ -1,7 +1,6 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
 from statistics import mean
-import pprint
 import time
 
 import mlx.core as mx
@@ -27,17 +26,15 @@ EXPERT_MAP = {
     14: "192.168.1.6:6000",
     15: "192.168.1.6:6000",
 }
-URL = "192.168.1.6:6000"
+MY_URL = "192.168.1.6:6000"
 
 
 class MoeShard:
 
-    def __init__(
-        self,
-        experts: dict,
-    ) -> None:
+    def __init__(self, experts: dict) -> None:
         self.experts = experts
         self.act_fn = nn.silu
+        self.ptr_cache = {}
 
     def get_expert_generator(self, e: int):
         v1, w1 = None, None
@@ -53,13 +50,20 @@ class MoeShard:
         for e in self.experts:
             self.experts[e]["generator"] = self.get_expert_generator(e)
 
-    def __call__(self, inputs: mx.array, jobs: list) -> None:
-        # sample jobs:
-        # [[{14}, 1], [{}, 2]]
-        # for each job,
-        # job[0] indicates activated experts in this shard for inputs[i]
+    def __call__(
+        self, x: mx.array, job: tuple, use_cache: bool
+    ) -> tuple[mx.array, dict]:
+        # sample job:
+        # ({14}, 1)
+        # job[0] indicates activated experts in this shard for x
         # job[1] indicates num additional calculations needed to avoid
         # wire memory driver activity from surfacing
+
+        def get_weights(e):
+            if not use_cache:
+                self.ptr_cache[e] = next(self.experts[e]["generator"])
+
+            return self.ptr_cache[e]
 
         def mlp(x, v1, w1, w2, dst):
             y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
@@ -69,34 +73,38 @@ class MoeShard:
         arr_map = {}
 
         for e in self.experts:
-            v1, w1, w2 = next(self.experts[e]["generator"])
-            for i, x in enumerate(inputs):
-                if e in jobs[i][0]:
-                    mlp(x, v1, w1, w2, expert_outs)
-                    arr_map[f"{i}.{e}"] = len(expert_outs) - 1
-                elif jobs[i][1] > 0:
-                    mlp(x, v1, w1, w2, expert_outs)
-                    jobs[i][1] -= 1
+            v1, w1, w2 = get_weights(e)
+            if e in job[0]:
+                mlp(x, v1, w1, w2, expert_outs)
+                arr_map[e] = len(expert_outs) - 1
+            elif job[1] > 0:
+                mlp(x, v1, w1, w2, expert_outs)
+                job[1] -= 1
+        
+        if len(expert_outs) == 0:
+            return
 
         expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
+
+        return expert_outs, arr_map
 
 
 def design_jobs(inds: list[list[int]]) -> list:
     jobs = []
 
     for activated_experts in inds:
-        job = [set(), 0]
+        job = set()
         shard_loads = {}
 
         for e in activated_experts:
             url = EXPERT_MAP[e]
-            if url == URL:
-                job[0].add(e)
+            if url == MY_URL:
+                job.add(e)
             shard_loads[url] = shard_loads.get(url, 0) + 1
 
-        job[1] = max(shard_loads.values()) - len(job[0])
-        jobs.append(job)
+        # jobs.append((job, max(shard_loads.values()) - len(job)))
+        jobs.append((job, 0))
 
     return jobs
 
@@ -109,8 +117,8 @@ def main():
     mx.eval(experts)
     shard = MoeShard(experts)
 
-    batch_size = 1
-    n_layers = 40
+    batch_size = 64
+    n_layers = 400
 
     rng = default_rng(seed=0)
     jobss = []
@@ -120,7 +128,7 @@ def main():
             inds.append(rng.choice(16, size=4, replace=False).tolist())
         jobss.append(design_jobs(inds))
 
-    xs = mx.random.uniform(-1, 1, (batch_size, 6144), mx.bfloat16)
+    xs = mx.random.uniform(-1, 1, (6144,), mx.bfloat16)
     mx.eval(xs)
 
     latencies = []
@@ -131,12 +139,13 @@ def main():
 
         tic = time.perf_counter_ns()
 
-        shard(xs, jobss[i])
+        for j in range(batch_size):
+            shard(xs, jobss[i][j], use_cache=bool(j > 0))
 
         latency = time.perf_counter_ns() - tic
         latencies.append(latency)
         print(f"finished layer {i} in {round(latency / 1000, 3)} mu_s", flush=True)
-        # time.sleep(1)
+        time.sleep(0.002)
 
     print(f"AVG latency: {round(mean(latencies[5:]) / 1000, 3)} mu_s")
 

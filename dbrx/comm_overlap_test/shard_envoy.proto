@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+service ShardEnvoy {
+  rpc Start (TestIns) returns (Empty) {}
+  rpc SignalReady (Empty) returns (Empty) {}
+  rpc Receive (ShardOuts) returns (Empty) {}
+}
+
+message TestIns {
+  int32 batch_size = 1;
+}
+
+message ShardOuts {
+  bytes data = 1;
+  bytes metadata = 2;
+}
+
+message Empty {}
