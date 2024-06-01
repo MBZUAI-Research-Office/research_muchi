@@ -1,13 +1,13 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
+from contextlib import AsyncExitStack
 from collections import deque
-from contextlib import ExitStack
-from concurrent import futures
 from dataclasses import dataclass
 from multiprocessing import connection
 from pathlib import Path
 from typing import Any, Optional, Tuple
 import argparse
+import asyncio
 import inspect
 import json
 import logging
@@ -30,6 +30,11 @@ from serialization_utils import mx_to_bytes, bytes_to_mx
 DEFAULT_TEMP = 0.6
 DEFAULT_SEED = 7
 DEFAULT_STARTUP_WARMING_PERIOD = 10  # unit: tokens
+
+# coroutines to be invoked when the event loop is shutting down
+# copied from:
+# https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
+_cleanup_coroutines = []
 
 
 @dataclass
@@ -521,27 +526,26 @@ def shard_main(
     conn.close()
 
 
-class Buffer:
+class DataBuffer:
 
     def __init__(self, n_layers: int, n_oth_shards: int) -> None:
         self.n_layers = n_layers
         self.n_oth_shards = n_oth_shards
-        # last bin reserved for everyone is ready signal
-        self.data = [{} for _ in range(self.n_layers + 1)]
 
-    def reset(self, layer_num: int) -> None:
-        self.data[layer_num] = {}
+        self.data = []
+        for _ in range(self.n_layers + 1):  # last bin for before_warm sync
+            self.data.append({})
 
-    def put(self, d: Any, layer_num: int, bi: int = 0) -> None:
-        self.data[layer_num].setdefault(bi, []).append(d)
+    def reset(self, li: int):
+        self.data[li] = {}
 
-    def wait_until_full(self, layer_num: int, bi: int = 0) -> list[Any]:
-        while (
-            bi not in self.data[layer_num]
-            or len(self.data[layer_num][bi]) < self.n_oth_shards
-        ):
-            pass
-        return self.data[layer_num][bi]
+    def put(self, d: Any, li: int, bi: int = 0) -> None:
+        self.data[li].setdefault(bi, []).append(d)
+
+    async def wait_til_full(self, li: int, bi: int = 0) -> list[Any]:
+        while len(self.data[li][bi]) != self.n_oth_shards:
+            await asyncio.sleep(0)
+        return self.data[li][bi]
 
 
 class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
@@ -553,7 +557,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         self.config = self.get_config(model_path, config_filename)
 
         self.gen_queue = deque()
-        self.buffer = Buffer(self.config["n_layers"], len(self.config["oth_urls"]))
+        self.buffer = DataBuffer(self.config["n_layers"], len(self.config["oth_urls"]))
 
     def get_config(self, model_path: str, config_filename: str) -> dict:
         try:
@@ -576,60 +580,67 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
         return config
 
-    def sync_w_oths(
+    async def sync_w_oths(
         self,
-        executor: futures.Executor,
-        oth_shards: dict,
-        layer_num: int = None,
+        oth_shards: list,
+        li: int = None,
         before_warming: bool = False,
     ) -> None:
+
+        async def signal(shard):
+            await shard.SignalReady(shard_envoy_pb2.Identifier(li=li))
+
         if before_warming:
-            layer_num = self.config["n_layers"]  # points to buffer's last bin
+            li = self.config["n_layers"]  # points to buffer's last bin
         else:
+            while not self.conn.poll():
+                await asyncio.sleep(0)
+
             self.conn.recv()  # means warmer is done
 
-        fs = []
-        for shard in oth_shards.values():
-            fut = executor.submit(
-                shard.SignalReady,
-                shard_envoy_pb2.Identifier(layer_num=layer_num),
-            )
-            fs.append(fut)
+        async with asyncio.TaskGroup() as tg:
+            for shard in oth_shards:
+                tg.create_task(signal(shard))
+            tg.create_task(self.buffer.wait_til_full(li))
 
-        tic = time.perf_counter()
-        futures.wait(fs)
-        logging.info(f"signalling took {time.perf_counter() - tic} sec(s)")
-        self.buffer.wait_until_full(layer_num)
-        self.buffer.reset(layer_num)
+        self.buffer.reset(li)
 
-    def all_dispatch(
-        self, executor: futures.Executor, oth_shards: dict, fut_to_task: dict
-    ) -> None:
+    async def all_dispatch_n_combine(self, oth_shards: list, li: int, bi: int) -> None:
+
+        async def dispatch(shard, data, metadata):
+            await shard.Receive(shard_envoy_pb2.ShardOuts(data=data, metadata=metadata))
+
+        async def all_combine():
+            arr = await self.buffer.wait_til_full(li, bi)
+            for d, meta_d in arr:
+                self.conn.send_bytes(d)
+                self.conn.send_bytes(meta_d)
+
+        while not self.conn.poll():
+            await asyncio.sleep(0)
+
         data = self.conn.recv_bytes()
         metadata = self.conn.recv_bytes()
 
-        for shard in oth_shards.values():
-            fut = executor.submit(
-                shard.Receive,
-                shard_envoy_pb2.ShardOuts(data=data, metadata=metadata),
-            )
-            fut_to_task[fut] = 0  # encoding for dispatch task
+        async with asyncio.TaskGroup() as tg:
+            for shard in oth_shards:
+                tg.create_task(dispatch(shard, data, metadata))
+            tg.create_task(all_combine())
 
     def SignalReady(self, request: shard_envoy_pb2.Identifier, context):
-        self.buffer.put(True, request.layer_num)
+        self.buffer.put(True, request.li)
         return shard_envoy_pb2.Empty()
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
-        url, layer_num, bi, arr_map = pickle.loads(request.metadata)
-        self.buffer.put((request.data, request.metadata), layer_num, bi)
+        url, li, bi, arr_map = pickle.loads(request.metadata)
+        self.buffer.put((request.data, request.metadata), li, bi)
         return shard_envoy_pb2.Empty()
 
-    def Generate(self, request: shard_envoy_pb2.UsrIns, context):
+    async def Generate(self, request: shard_envoy_pb2.UsrIns, context):
         logging.info(f"received generation request")
-        job = {"req": request}
+        job = {"req": request, "completed": asyncio.Event()}
         self.gen_queue.append(job)
-        while "resp" not in job:
-            pass
+        await job["completed"].wait()
         return shard_envoy_pb2.UsrOuts(
             prompt_time=job["resp"][0],
             prompt_t_cnt=job["resp"][1],
@@ -638,16 +649,15 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             response=job["resp"][4],
         )
 
-    def start(self) -> None:
+    async def start(self) -> None:
 
         global DEFAULT_STARTUP_WARMING_PERIOD
 
-        with ExitStack() as es:
-            executor = es.enter_context(futures.ThreadPoolExecutor())
-            oth_shards = {}
+        async with AsyncExitStack() as es:
+            oth_shards = []
             for url in self.config["oth_urls"]:
-                channel = es.enter_context(
-                    grpc.insecure_channel(
+                channel = await es.enter_async_context(
+                    grpc.aio.insecure_channel(
                         url,
                         options=[
                             ("grpc.max_send_message_length", -1),
@@ -656,16 +666,16 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     )
                 )
                 shard = shard_envoy_pb2_grpc.ShardEnvoyStub(channel)
-                oth_shards[url] = shard
+                oth_shards.append(shard)
 
             while True:
                 if len(self.gen_queue) == 0 or DEFAULT_STARTUP_WARMING_PERIOD > 0:
-                    self.sync_w_oths(executor, oth_shards, before_warming=True)
+                    await self.sync_w_oths(oth_shards, before_warming=True)
                     logging.info(f"warming...")
                     self.conn.send(False)  # signal Generator that this is a warming run
 
-                    for i in range(self.config["n_layers"]):
-                        self.sync_w_oths(executor, oth_shards, layer_num=i)
+                    for li in range(self.config["n_layers"]):
+                        await self.sync_w_oths(oth_shards, li=li)
                         self.conn.send(True)  # signals warmer that this layer is done
 
                     DEFAULT_STARTUP_WARMING_PERIOD -= 1
@@ -682,19 +692,8 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 for _ in range(gen["req"].max_tokens):
                     batch_size = self.conn.recv()
                     for li in range(self.config["n_layers"]):
-                        fut_to_task = {}
                         for bi in range(batch_size):
-                            self.all_dispatch(executor, oth_shards, fut_to_task)
-                            fut_to_task[
-                                executor.submit(self.buffer.wait_until_full, li, bi)
-                            ] = 1
-
-                        for fut in futures.as_completed(fut_to_task):
-                            if fut_to_task[fut] == 0:
-                                continue
-                            for data, metadata in fut.result():
-                                self.conn.send_bytes(data)
-                                self.conn.send_bytes(metadata)
+                            await self.all_dispatch_n_combine(oth_shards, li, bi)
 
                         self.buffer.reset(li)
 
@@ -703,33 +702,52 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                         break
 
                 gen["resp"] = self.conn.recv()
+                gen["completed"].set()
                 self.gen_queue.popleft()
+
+
+async def serve(
+    port: int, model_path: str, config_filename: str, conn: connection.Connection
+):
+    server = grpc.aio.server(
+        options=[
+            ("grpc.max_send_message_length", -1),
+            ("grpc.max_receive_message_length", -1),
+        ]
+    )
+    servicer = ShardEnvoyServicer(model_path, config_filename, conn)
+    shard_envoy_pb2_grpc.add_ShardEnvoyServicer_to_server(servicer, server)
+    listen_addr = f"[::]:{port}"
+    server.add_insecure_port(listen_addr)
+    await server.start()
+    logging.info(f"server started, listening on {listen_addr}")
+
+    conn.recv()  # wait for Generator to finish initializing before starting to warm up
+    await servicer.start()
+
+    # copied from:
+    # https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
+    async def server_graceful_shutdown():
+        logging.info("Starting graceful shutdown...")
+        # Shuts down the server with 3 seconds of grace period. During the
+        # grace period, the server won't accept new connections and allow
+        # existing RPCs to continue within the grace period.
+        await server.stop(3)
+
+    _cleanup_coroutines.append(server_graceful_shutdown())
+    await server.wait_for_termination()
 
 
 def envoy_main(
     port: int, model_path: str, config_filename: str, conn: connection.Connection
 ):
     logging.basicConfig(level=logging.INFO)
-
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=10),
-        options=[
-            ("grpc.max_send_message_length", -1),
-            ("grpc.max_receive_message_length", -1),
-        ],
-    )
-    servicer = ShardEnvoyServicer(model_path, config_filename, conn)
-    shard_envoy_pb2_grpc.add_ShardEnvoyServicer_to_server(servicer, server)
-    listen_addr = f"[::]:{port}"
-    server.add_insecure_port(listen_addr)
-    server.start()
-    logging.info(f"server started, listening on {listen_addr}")
-    conn.recv()  # wait for Generator to finish initializing before starting to warm up
-    servicer.start()
-
-    # this might not be needed because servicer.start() enters an infinite loop
-    server.wait_for_termination()
-    conn.close()
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(serve(port, model_path, config_filename, conn))
+    finally:
+        loop.run_until_complete(*_cleanup_coroutines)
+        loop.close()
 
 
 if __name__ == "__main__":

@@ -27,5 +27,5 @@ message ShardOuts {
 message Empty {}
 
 message Identifier {
-  int32 layer_num = 1;
+  int32 li = 1;
 }

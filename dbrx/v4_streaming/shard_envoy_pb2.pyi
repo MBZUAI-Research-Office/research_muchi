@@ -39,7 +39,7 @@ class Empty(_message.Message):
     def __init__(self) -> None: ...
 
 class Identifier(_message.Message):
-    __slots__ = ("layer_num",)
-    LAYER_NUM_FIELD_NUMBER: _ClassVar[int]
-    layer_num: int
-    def __init__(self, layer_num: _Optional[int] = ...) -> None: ...
+    __slots__ = ("li",)
+    LI_FIELD_NUMBER: _ClassVar[int]
+    li: int
+    def __init__(self, li: _Optional[int] = ...) -> None: ...
