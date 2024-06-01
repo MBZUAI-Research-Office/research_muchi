@@ -605,16 +605,10 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
         self.buffer.reset(li)
 
-    async def all_dispatch_n_combine(self, oth_shards: list, li: int, bi: int) -> None:
+    async def all_dispatch(self, oth_shards: list) -> None:
 
         async def dispatch(shard, data, metadata):
             await shard.Receive(shard_envoy_pb2.ShardOuts(data=data, metadata=metadata))
-
-        async def all_combine():
-            arr = await self.buffer.wait_til_full(li, bi)
-            for d, meta_d in arr:
-                self.conn.send_bytes(d)
-                self.conn.send_bytes(meta_d)
 
         while not self.conn.poll():
             await asyncio.sleep(0)
@@ -625,7 +619,14 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(dispatch(shard, data, metadata))
-            tg.create_task(all_combine())
+
+    async def all_combine(self, li: int, batch_size: int):
+        coros = [self.buffer.wait_til_full(li, bi) for bi in range(batch_size)]
+        for coro in asyncio.as_completed(coros):
+            arr = await coro
+            for d, meta_d in arr:
+                self.conn.send_bytes(d)
+                self.conn.send_bytes(meta_d)
 
     def SignalReady(self, request: shard_envoy_pb2.Identifier, context):
         self.buffer.put(True, request.li)
@@ -692,9 +693,10 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 for _ in range(gen["req"].max_tokens):
                     batch_size = self.conn.recv()
                     for li in range(self.config["n_layers"]):
-                        for bi in range(batch_size):
-                            await self.all_dispatch_n_combine(oth_shards, li, bi)
+                        for _bi in range(batch_size):
+                            await self.all_dispatch(oth_shards)
 
+                        await self.all_combine(li, batch_size)
                         self.buffer.reset(li)
 
                     continue_sig = self.conn.recv()
