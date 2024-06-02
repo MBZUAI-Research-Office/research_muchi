@@ -5,7 +5,7 @@ from collections import deque, OrderedDict
 from dataclasses import dataclass
 from multiprocessing import connection
 from pathlib import Path
-from typing import Any, Optional, Tuple, Self
+from typing import Any, Optional, Tuple
 import argparse
 import asyncio
 import inspect
