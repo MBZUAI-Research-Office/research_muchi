@@ -57,51 +57,15 @@ class ModelArgs:
         )
 
 
-@dataclass
-class ListNode:
-    val: int = None
-    left: Self = None
-    right: Self = None
+class LruCache(OrderedDict):
+    # inspired by:
+    # https://docs.python.org/3/library/collections.html#collections.OrderedDict
+    # https://stackoverflow.com/questions/21062781/shortest-way-to-get-first-item-of-ordereddict-in-python-3
 
-
-class LruCache:
-
-    def __init__(self, experts) -> None:
-        self.e_to_node = OrderedDict()
-        self.head, self.tail = ListNode(), ListNode()
-        self.build_doubly_linked_list(experts)
-
-    def build_doubly_linked_list(self, experts):
-        l = self.head
-        for e in experts:
-            l = self.e_to_node[e] = ListNode(val=e, left=l)
-        self.tail.left = l
-
-        r = self.tail
-        for node in reversed(self.e_to_node.values()):
-            node.right = r
-            r = node
-        self.head.right = r
-
-    def make_last(self, node):
-        # sew neighbors together
-        node.left.right = node.right
-        node.right.left = node.left
-
-        org_last = self.tail.left
-        org_last.right = node
-        self.tail.left = node
-        node.left = org_last
-        node.right = self.tail
-
-    def get(self) -> int:
-        lru = self.head.right
-        self.make_last(lru)
-        return lru.val
-
-    def use(self, e) -> None:
-        node = self.e_to_node[e]
-        self.make_last(node)
+    def get_lru(self) -> Any:
+        k = next(iter(self))
+        self.move_to_end(k)
+        return k
 
 
 class Attention(nn.Module):
@@ -198,7 +162,7 @@ class MoeShard:
     def __init__(self, experts: dict) -> None:
         self.experts = experts
         self.act_fn = nn.silu
-        self.lru_cache = LruCache(self.experts.keys())
+        self.lru_cache = LruCache.fromkeys(self.experts.keys())
         self.ptr_cache = {}
 
     def get_expert_generator(self, e: int):
@@ -236,14 +200,14 @@ class MoeShard:
 
         expert_outs = []
         arr_map = {}
-        lru_experts = set(self.lru_cache.get() for _ in range(job[1]))
+        lru_experts = set(self.lru_cache.get_lru() for _ in range(job[1]))
 
         for e in self.experts:
             v1, w1, w2 = get_weights(e)
             if e in job[0]:
                 mlp(x, v1, w1, w2, expert_outs)
                 arr_map[e] = len(expert_outs) - 1
-                self.lru_cache.use(e)
+                self.lru_cache.move_to_end(e)
             elif job[1] > 0 and e in lru_experts:
                 mlp(x, v1, w1, w2, expert_outs)
                 job[1] -= 1
