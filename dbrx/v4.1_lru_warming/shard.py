@@ -162,7 +162,6 @@ class MoeShard:
     def __init__(self, experts: dict) -> None:
         self.experts = experts
         self.act_fn = nn.silu
-        self.lru_cache = LruCache.fromkeys(self.experts.keys())
         self.ptr_cache = {}
 
     def get_expert_generator(self, e: int):
@@ -180,13 +179,8 @@ class MoeShard:
             self.experts[e]["generator"] = self.get_expert_generator(e)
 
     def __call__(
-        self, x: mx.array, job: list, use_cache: bool
+        self, x: mx.array, job: set, use_cache: bool
     ) -> tuple[mx.array, dict]:
-        # sample job:
-        # [{14}, 1]
-        # job[0] indicates activated experts in this shard for x
-        # job[1] indicates num additional calculations needed to avoid
-        # wire memory driver activity from surfacing
 
         def get_weights(e):
             if not use_cache:
@@ -200,17 +194,12 @@ class MoeShard:
 
         expert_outs = []
         arr_map = {}
-        lru_experts = set(self.lru_cache.get_lru() for _ in range(job[1]))
 
         for e in self.experts:
             v1, w1, w2 = get_weights(e)
-            if e in job[0]:
+            if e in job:
                 mlp(x, v1, w1, w2, expert_outs)
                 arr_map[e] = len(expert_outs) - 1
-                self.lru_cache.move_to_end(e)
-            elif job[1] > 0 and e in lru_experts:
-                mlp(x, v1, w1, w2, expert_outs)
-                job[1] -= 1
 
         expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
@@ -228,21 +217,25 @@ class DistributedMoeBlock(nn.Module):
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
         self.expert_map = args.ffn_config["expert_map"]
         self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
+        self.lru_cache = LruCache.fromkeys(args.ffn_config["shard_map"][self.url])
 
     def design_jobs(self, inds: list[list[int]]) -> list:
         jobs = []
 
         for activated_experts in inds:
-            job = [set(), 0]
+            job = set()
             shard_loads = {}
-
             for e in activated_experts:
                 url = self.expert_map[e]
                 if url == self.url:
-                    job[0].add(e)
+                    job.add(e)
+                    self.lru_cache.move_to_end(e)
                 shard_loads[url] = shard_loads.get(url, 0) + 1
 
-            job[1] = max(shard_loads.values()) - len(job[0])
+            n_warmups = max(shard_loads.values()) - len(job)
+            for _ in range(n_warmups):
+                job.add(self.lru_cache.get_lru())
+
             jobs.append(job)
 
         return jobs
@@ -383,7 +376,7 @@ class Warmer:
         self.conn = conn
 
         self.x = mx.ones((args.d_model,), dtype=mx.bfloat16)
-        self.job = [set(args.ffn_config["shard_map"][args.ffn_config["shard_url"]]), 0]
+        self.job = set(args.ffn_config["shard_map"][args.ffn_config["shard_url"]])
         mx.eval(self.x)
 
     def sync_w_oths(self):
