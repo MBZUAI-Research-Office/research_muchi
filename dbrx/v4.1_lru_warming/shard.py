@@ -241,15 +241,15 @@ class DistributedMoeBlock(nn.Module):
         uses_warmup = any(v == 0 for v in cnt.values())
 
         for i in range(len(jobs)):
-            for e in job[i]:
+            for e in jobs[i]:
                 self.lru_cache.move_to_end(e)
 
             if not uses_warmup:
                 continue
 
-            n_warmups = max_loads[i] - len(job[i])
+            n_warmups = max_loads[i] - len(jobs[i])
             for _ in range(n_warmups):
-                job[i].add(self.lru_cache.get_lru())
+                jobs[i].add(self.lru_cache.get_lru())
 
         return jobs
 
