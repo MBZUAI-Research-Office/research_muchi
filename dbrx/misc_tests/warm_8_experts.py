@@ -11,19 +11,21 @@ class MoeShard:
     def __init__(self, experts: dict) -> None:
         self.experts = experts
 
-    def get_expert_generator(self, e: int):
-        v1, w1 = None, None
-        for i, weight in enumerate(self.experts[e]["weights"]):
-            if i % 3 == 0:
-                v1 = weight
-            elif i % 3 == 1:
-                w1 = weight
-            else:
-                yield v1, w1, weight
+    def reset_expert_generators(self, for_warming: bool = False):
 
-    def reset_expert_generators(self):
+        def get_expert_generator(e):
+            v1, w1 = None, None
+            for i, weight in enumerate(self.experts[e]["weights"]):
+                if i % 3 == 0:
+                    v1 = weight.T
+                elif i % 3 == 1:
+                    w1 = weight.T
+                else:
+                    w2 = weight.T if for_warming else weight
+                    yield v1, w1, w2
+
         for e in self.experts:
-            self.experts[e]["generator"] = self.get_expert_generator(e)
+            self.experts[e]["generator"] = get_expert_generator(e)
 
     def warm(self) -> None:
         xs = []
@@ -47,7 +49,7 @@ def main():
 
     for i in range(n):
         if i % 40 == 0:
-            shard.reset_expert_generators()
+            shard.reset_expert_generators(for_warming=True)
 
         tic = time.perf_counter_ns()
 

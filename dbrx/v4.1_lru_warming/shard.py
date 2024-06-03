@@ -178,9 +178,7 @@ class MoeShard:
         for e in self.experts:
             self.experts[e]["generator"] = self.get_expert_generator(e)
 
-    def __call__(
-        self, x: mx.array, job: set, use_cache: bool
-    ) -> tuple[mx.array, dict]:
+    def __call__(self, x: mx.array, job: set, use_cache: bool) -> tuple[mx.array, dict]:
 
         def get_weights(e):
             if not use_cache:
@@ -212,15 +210,20 @@ class DistributedMoeBlock(nn.Module):
         super().__init__()
         self.layer_num = layer_num
         self.d_model = args.d_model
+
         self.url = args.ffn_config["shard_url"]
-        self.n_oth_shards = len(args.ffn_config["shard_map"]) - 1
-        self.num_experts_per_tok = args.ffn_config["moe_top_k"]
         self.expert_map = args.ffn_config["expert_map"]
-        self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
+        self.n_oth_shards = len(args.ffn_config["shard_map"]) - 1
         self.lru_cache = LruCache.fromkeys(args.ffn_config["shard_map"][self.url])
+
+        self.n_experts_in_cluster = args.ffn_config["moe_num_experts"]
+        self.num_experts_per_tok = args.ffn_config["moe_top_k"]
+        self.router = Router(args.d_model, self.n_experts_in_cluster)
 
     def design_jobs(self, inds: list[list[int]]) -> list:
         jobs = []
+        max_loads = []
+        cnt = {e: 0 for e in range(self.n_experts_in_cluster)}
 
         for activated_experts in inds:
             job = set()
@@ -229,14 +232,24 @@ class DistributedMoeBlock(nn.Module):
                 url = self.expert_map[e]
                 if url == self.url:
                     job.add(e)
-                    self.lru_cache.move_to_end(e)
+                cnt[e] += 1
                 shard_loads[url] = shard_loads.get(url, 0) + 1
 
-            n_warmups = max(shard_loads.values()) - len(job)
-            for _ in range(n_warmups):
-                job.add(self.lru_cache.get_lru())
-
             jobs.append(job)
+            max_loads.append(max(shard_loads.values()))
+
+        uses_warmup = any(v == 0 for v in cnt.values())
+
+        for i in range(len(jobs)):
+            for e in job[i]:
+                self.lru_cache.move_to_end(e)
+
+            if not uses_warmup:
+                continue
+
+            n_warmups = max_loads[i] - len(job[i])
+            for _ in range(n_warmups):
+                job[i].add(self.lru_cache.get_lru())
 
         return jobs
 
