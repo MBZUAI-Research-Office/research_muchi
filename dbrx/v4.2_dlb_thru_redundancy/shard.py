@@ -224,7 +224,7 @@ class DistributedMoeBlock(nn.Module):
         self.e_to_g = args.ffn_config["e_to_g"]
         self.dlb_groups = args.ffn_config["dlb_groups"]
         self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
-        self.lru_cache = LruCache.fromkeys(args.ffn_config["shard_map"][self.url])
+        self.lru_cache = LruCache.fromkeys(args.ffn_config["assigned_experts"])
 
         self.n_experts_in_cluster = args.ffn_config["moe_num_experts"]
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
