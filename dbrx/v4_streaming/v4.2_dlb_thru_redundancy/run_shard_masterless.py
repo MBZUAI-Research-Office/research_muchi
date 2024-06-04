@@ -117,7 +117,7 @@ def main():
 
     Cmd(f"""tmux send-keys -t 0 'clear' Enter \;""")
     Cmd(f"""tmux send-keys -t 0 'conda activate dbrx_poc' Enter \;""")
-    Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/v4.2_dlb_thru_redundancy' Enter \;""")
+    Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/v4_streaming/v4.2_dlb_thru_redundancy' Enter \;""")
     Cmd(
         f"""tmux send-keys -t 0 'python shard.py --port {args.port}"""
         + f""" --model-path ~/dbrx-base/distributable/batch2"""
