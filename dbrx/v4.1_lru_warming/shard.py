@@ -199,8 +199,11 @@ class MoeShard:
                 mlp(x, v1, w1, w2, expert_outs)
                 arr_map[e] = len(expert_outs) - 1
 
-        expert_outs = mx.stack(expert_outs, axis=0)
-        mx.eval(expert_outs)
+        if len(expert_outs) > 0:
+            expert_outs = mx.stack(expert_outs, axis=0)
+            mx.eval(expert_outs)
+        else:
+            expert_outs = mx.array(False)
 
         return expert_outs, arr_map
 
