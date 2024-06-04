@@ -1,15 +1,8 @@
-# Examples:
-#  launch all shards:
-#    python launch_shards_masterless.py --model-path ~/dbrx-base/distributable/batch2/
-#
-#  terminate all shards:
-#    python launch_shards_masterless.py --model-path ~/dbrx-base/distributable/batch2/ --terminate
 import subprocess
+import argparse
 import time
 from types import SimpleNamespace
-import argparse
-from pathlib import Path
-import json
+import sys
 
 """terminal color"""
 TC = SimpleNamespace(
@@ -25,7 +18,7 @@ TC = SimpleNamespace(
 
 class Cmd:
     def __new__(
-        self, cmd: str, cwd="./", timeout_duration=None, suppress=True
+        self, cmd: str, cwd="./", timeout_duration=None, suppress=False
     ) -> tuple[int, str, str]:
         self.cmd = cmd
         self.cwd = cwd
@@ -97,43 +90,41 @@ class Cmd:
         return self.returncode, str(out, encoding="utf8"), str(err, encoding="utf8")
 
 
+def list_of_strings(arg):
+    return arg.split(",")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model-path", required=True, type=str, help="Path to local model directory"
-    )
+    # parser.add_argument("--ports", required=True, type=str)
+    # parser.add_argument("--ports", type=list_of_strings)
+    parser.add_argument("--port", type=int)
     parser.add_argument("--terminate", action="store_true")
     args = parser.parse_args()
-    try:
-        with open(Path(args.model_path) / "v4_broker_config.json", "r") as f:
-            config = json.load(f)
-    except FileNotFoundError:
-        raise
 
-    for url in config["shard_urls"]:
-        pure_url, port = url.split(":")
-        print(f"Shard: {pure_url} {port} ", end="")
-        Cmd(
-            f"""scp -i ~/.ssh/id_llamacpp ./run_shard_masterless.py xiangruike@{pure_url}:/users/xiangruike"""
-        )
-        if args.terminate:
-            rc, out, err = Cmd(
-                f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{pure_url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --port {port} --terminate'"""
-            )
-            if rc != 0:
-                print(err.strip())
-            else:
-                print("[terminated successfully]")
-        else:
-            rc, out, err = Cmd(
-                f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{pure_url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --port {port}'"""
-            )
-            if rc != 0:
-                print(err.strip())
-            else:
-                print("[launched successfully]")
+    print("Sorry, we need to kill the tmux server")
+    Cmd("""tmux kill-server""")
+    if args.terminate:
+        return
+
+    rc, out, err = Cmd(
+        """tmux -f /dev/null new-session -s dbrx_poc -n experts -d zsh \;"""
+    )
+    if rc != 0:
+        print(err, file=sys.stderr)
+        sys.exit(1)
+    Cmd("""tmux set-option -g mouse on""")
+
+    Cmd(f"""tmux send-keys -t 0 'clear' Enter \;""")
+    Cmd(f"""tmux send-keys -t 0 'conda activate dbrx_poc' Enter \;""")
+    Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/v4_streaming/v4.1_lru_warming' Enter \;""")
+    Cmd(
+        f"""tmux send-keys -t 0 'python shard.py --port {args.port}"""
+        + f""" --model-path ~/dbrx-base/distributable/batch2"""
+        + f""" --config-filename shard_config_0.json' Enter \;""",
+    )
+
+    # Cmd("""tmux -f /dev/null attach -t dbrx_poc""")
 
 
 if __name__ == "__main__":

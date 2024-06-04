@@ -164,19 +164,28 @@ class MoeShard:
         self.act_fn = nn.silu
         self.ptr_cache = {}
 
-    def get_expert_generator(self, e: int):
-        v1, w1 = None, None
-        for i, weight in enumerate(self.experts[e]["weights"]):
-            if i % 3 == 0:
-                v1 = weight.T
-            elif i % 3 == 1:
-                w1 = weight.T
-            else:
-                yield v1, w1, weight
+    def reset_expert_generators(self, for_warming: bool = False):
 
-    def reset_expert_generators(self):
+        def get_expert_generator(e):
+            v1, w1 = None, None
+            for i, weight in enumerate(self.experts[e]["weights"]):
+                if i % 3 == 0:
+                    v1 = weight.T
+                elif i % 3 == 1:
+                    w1 = weight.T
+                else:
+                    w2 = weight.T if for_warming else weight
+                    yield v1, w1, w2
+
         for e in self.experts:
-            self.experts[e]["generator"] = self.get_expert_generator(e)
+            self.experts[e]["generator"] = get_expert_generator(e)
+
+    def warm(self) -> None:
+        xs = []
+        for e in self.experts:
+            xs.extend(next(self.experts[e]["generator"]))
+
+        mx.eval(mx.sum(mx.stack(xs, axis=0), axis=0))
 
     def __call__(self, x: mx.array, job: set, use_cache: bool) -> tuple[mx.array, dict]:
 
@@ -212,46 +221,48 @@ class DistributedMoeBlock(nn.Module):
         self.d_model = args.d_model
 
         self.url = args.ffn_config["shard_url"]
-        self.expert_map = args.ffn_config["expert_map"]
-        self.n_oth_shards = len(args.ffn_config["shard_map"]) - 1
-        self.lru_cache = LruCache.fromkeys(args.ffn_config["shard_map"][self.url])
+        self.e_to_g = args.ffn_config["e_to_g"]
+        self.dlb_groups = args.ffn_config["dlb_groups"]
+        self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
+        self.lru_cache = LruCache.fromkeys(args.ffn_config["assigned_experts"])
 
         self.n_experts_in_cluster = args.ffn_config["moe_num_experts"]
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
         self.router = Router(args.d_model, self.n_experts_in_cluster)
 
-    def design_jobs(self, inds: list[list[int]]) -> list:
+    def allocate_jobs(self, inds: list[list[int]]) -> tuple:
         jobs = []
+        job_map = []
         max_loads = []
-        cnt = {e: 0 for e in range(self.n_experts_in_cluster)}
 
         for activated_experts in inds:
-            job = set()
-            shard_loads = {}
+            by_dlb_group = {}
+            by_shard = {}
+            jm = {}
+
             for e in activated_experts:
-                url = self.expert_map[e]
-                if url == self.url:
-                    job.add(e)
-                cnt[e] += 1
-                shard_loads[url] = shard_loads.get(url, 0) + 1
+                by_dlb_group.setdefault(self.e_to_g[e], []).append(e)
 
-            jobs.append(job)
-            max_loads.append(max(shard_loads.values()))
+            for g, es in by_dlb_group.items():
+                members = self.dlb_groups[g]["members"]
+                for i, e in enumerate(es):
+                    url = members[i % len(members)]
+                    by_shard.setdefault(url, set()).add(e)
+                    jm[e] = url
 
-        uses_warmup = any(v == 0 for v in cnt.values())
+            jobs.append(by_shard.get(self.url, set()))
+            job_map.append(jm)
+            max_loads.append(max(len(v) for v in by_shard.values()))
 
         for i in range(len(jobs)):
-            for e in job[i]:
+            for e in jobs[i]:
                 self.lru_cache.move_to_end(e)
 
-            if not uses_warmup:
-                continue
-
-            n_warmups = max_loads[i] - len(job[i])
+            n_warmups = max_loads[i] - len(jobs[i])
             for _ in range(n_warmups):
-                job[i].add(self.lru_cache.get_lru())
+                jobs[i].add(self.lru_cache.get_lru())
 
-        return jobs
+        return jobs, job_map
 
     def all_dispatch(
         self,
@@ -296,7 +307,7 @@ class DistributedMoeBlock(nn.Module):
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs = self.design_jobs(inds)
+        jobs, job_map = self.allocate_jobs(inds)
         batch_size = x.shape[0]
         shard_outs = {}
 
@@ -310,7 +321,7 @@ class DistributedMoeBlock(nn.Module):
         for bi, st, it in zip(range(batch_size), scores, inds):
             yt = []
             for e in it:
-                url = self.expert_map[e]
+                url = job_map[bi][e]
                 expert_outs, arr_map = shard_outs[url][bi]
                 yt.append(expert_outs[arr_map[e]])
 
@@ -388,19 +399,15 @@ class Warmer:
         self.moe_shard = moe_shard
         self.conn = conn
 
-        self.x = mx.ones((args.d_model,), dtype=mx.bfloat16)
-        self.job = set(args.ffn_config["shard_map"][args.ffn_config["shard_url"]])
-        mx.eval(self.x)
-
     def sync_w_oths(self):
         self.conn.send(True)  # signals that I am ready
         self.conn.recv()  # confirms that everyone else is done
 
     def __call__(self):
         # warms moe_shard for 1 token
-        self.moe_shard.reset_expert_generators()
+        self.moe_shard.reset_expert_generators(for_warming=True)
         for _ in range(self.n_layers):
-            self.moe_shard(self.x, self.job, use_cache=False)
+            self.moe_shard.warm()
             self.sync_w_oths()
 
 
@@ -427,22 +434,23 @@ class Generator:
             raise
 
         model_args = ModelArgs.from_dict(config)
-        model_args.ffn_config["expert_map"] = {}
+        model_args.ffn_config["e_to_g"] = {}
 
-        for url, assigned_experts in model_args.ffn_config["shard_map"].items():
-            for e in assigned_experts:
-                model_args.ffn_config["expert_map"][e] = url
+        for g, d in model_args.ffn_config["dlb_groups"].items():
+            for e in d["experts"]:
+                model_args.ffn_config["e_to_g"][e] = g
+
+            if model_args.ffn_config["shard_url"] in d["members"]:
+                model_args.ffn_config["assigned_experts"] = d["experts"]
 
         return model_args
 
     def load_model_and_warmer(self) -> tuple[DBRX, Warmer]:
-        url = self.model_args.ffn_config["shard_url"]
-        assigned_experts = self.model_args.ffn_config["shard_map"][url]
         # sample:
         # {0: {"weights": mx.array([0, 1, 2, 3])}}
         experts = {
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
-            for e in assigned_experts
+            for e in self.model_args.ffn_config["assigned_experts"]
         }
         mx.eval(experts)
         moe_shard = MoeShard(experts)
@@ -596,10 +604,11 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             "oth_urls": [],
         }
 
-        for url in tmp["ffn_config"]["shard_map"]:
-            if url == config["url"]:
-                continue
-            config["oth_urls"].append(url)
+        for d in tmp["ffn_config"]["dlb_groups"].values():
+            for url in d["members"]:
+                if url == config["url"]:
+                    continue
+                config["oth_urls"].append(url)
 
         return config
 

@@ -30,7 +30,9 @@ def get_shard_urls(config_path: Path) -> list:
 async def call(
     shard: shard_envoy_pb2_grpc.ShardEnvoyStub, prompt: str, max_tokens: int
 ) -> shard_envoy_pb2.UsrOuts:
-    return await shard.Generate(shard_envoy_pb2.UsrIns(prompt=prompt, max_tokens=max_tokens))
+    return await shard.Generate(
+        shard_envoy_pb2.UsrIns(prompt=prompt, max_tokens=max_tokens)
+    )
 
 
 async def start(config_path: str, prompt: str, max_tokens: int) -> None:

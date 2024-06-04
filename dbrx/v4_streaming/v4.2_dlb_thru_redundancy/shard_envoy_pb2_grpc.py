@@ -14,6 +14,11 @@ class ShardEnvoyStub(object):
         Args:
             channel: A grpc.Channel.
         """
+        self.SignalReady = channel.unary_unary(
+                '/ShardEnvoy/SignalReady',
+                request_serializer=shard__envoy__pb2.Identifier.SerializeToString,
+                response_deserializer=shard__envoy__pb2.Empty.FromString,
+                )
         self.Generate = channel.unary_unary(
                 '/ShardEnvoy/Generate',
                 request_serializer=shard__envoy__pb2.UsrIns.SerializeToString,
@@ -24,15 +29,16 @@ class ShardEnvoyStub(object):
                 request_serializer=shard__envoy__pb2.ShardOuts.SerializeToString,
                 response_deserializer=shard__envoy__pb2.Empty.FromString,
                 )
-        self.WarmingSync = channel.unary_unary(
-                '/ShardEnvoy/WarmingSync',
-                request_serializer=shard__envoy__pb2.Identifier.SerializeToString,
-                response_deserializer=shard__envoy__pb2.Empty.FromString,
-                )
 
 
 class ShardEnvoyServicer(object):
     """Missing associated documentation comment in .proto file."""
+
+    def SignalReady(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
     def Generate(self, request, context):
         """Missing associated documentation comment in .proto file."""
@@ -46,15 +52,14 @@ class ShardEnvoyServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def WarmingSync(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
 
 def add_ShardEnvoyServicer_to_server(servicer, server):
     rpc_method_handlers = {
+            'SignalReady': grpc.unary_unary_rpc_method_handler(
+                    servicer.SignalReady,
+                    request_deserializer=shard__envoy__pb2.Identifier.FromString,
+                    response_serializer=shard__envoy__pb2.Empty.SerializeToString,
+            ),
             'Generate': grpc.unary_unary_rpc_method_handler(
                     servicer.Generate,
                     request_deserializer=shard__envoy__pb2.UsrIns.FromString,
@@ -63,11 +68,6 @@ def add_ShardEnvoyServicer_to_server(servicer, server):
             'Receive': grpc.unary_unary_rpc_method_handler(
                     servicer.Receive,
                     request_deserializer=shard__envoy__pb2.ShardOuts.FromString,
-                    response_serializer=shard__envoy__pb2.Empty.SerializeToString,
-            ),
-            'WarmingSync': grpc.unary_unary_rpc_method_handler(
-                    servicer.WarmingSync,
-                    request_deserializer=shard__envoy__pb2.Identifier.FromString,
                     response_serializer=shard__envoy__pb2.Empty.SerializeToString,
             ),
     }
@@ -79,6 +79,23 @@ def add_ShardEnvoyServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class ShardEnvoy(object):
     """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def SignalReady(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/ShardEnvoy/SignalReady',
+            shard__envoy__pb2.Identifier.SerializeToString,
+            shard__envoy__pb2.Empty.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
     @staticmethod
     def Generate(request,
@@ -110,23 +127,6 @@ class ShardEnvoy(object):
             metadata=None):
         return grpc.experimental.unary_unary(request, target, '/ShardEnvoy/Receive',
             shard__envoy__pb2.ShardOuts.SerializeToString,
-            shard__envoy__pb2.Empty.FromString,
-            options, channel_credentials,
-            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
-
-    @staticmethod
-    def WarmingSync(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/ShardEnvoy/WarmingSync',
-            shard__envoy__pb2.Identifier.SerializeToString,
             shard__envoy__pb2.Empty.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

@@ -117,11 +117,11 @@ def main():
 
     Cmd(f"""tmux send-keys -t 0 'clear' Enter \;""")
     Cmd(f"""tmux send-keys -t 0 'conda activate dbrx_poc' Enter \;""")
-    Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/v4_streaming' Enter \;""")
+    Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/v4_streaming/v4.2_dlb_thru_redundancy' Enter \;""")
     Cmd(
         f"""tmux send-keys -t 0 'python shard.py --port {args.port}"""
         + f""" --model-path ~/dbrx-base/distributable/batch2"""
-        + f""" --config-filename shard_config_0.json' Enter \;""",
+        + f""" --config-filename v4.2_shard_config.json' Enter \;""",
     )
 
     # Cmd("""tmux -f /dev/null attach -t dbrx_poc""")

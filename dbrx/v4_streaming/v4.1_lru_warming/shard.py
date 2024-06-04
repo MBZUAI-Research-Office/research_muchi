@@ -1,11 +1,11 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
 from contextlib import AsyncExitStack
-from collections import deque
+from collections import deque, OrderedDict
 from dataclasses import dataclass
 from multiprocessing import connection
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 import argparse
 import asyncio
 import inspect
@@ -55,6 +55,17 @@ class ModelArgs:
                 if k in inspect.signature(cls).parameters
             }
         )
+
+
+class LruCache(OrderedDict):
+    # inspired by:
+    # https://docs.python.org/3/library/collections.html#collections.OrderedDict
+    # https://stackoverflow.com/questions/21062781/shortest-way-to-get-first-item-of-ordereddict-in-python-3
+
+    def get_lru(self) -> Any:
+        k = next(iter(self))
+        self.move_to_end(k)
+        return k
 
 
 class Attention(nn.Module):
@@ -151,6 +162,7 @@ class MoeShard:
     def __init__(self, experts: dict) -> None:
         self.experts = experts
         self.act_fn = nn.silu
+        self.ptr_cache = {}
 
     def get_expert_generator(self, e: int):
         v1, w1 = None, None
@@ -166,13 +178,13 @@ class MoeShard:
         for e in self.experts:
             self.experts[e]["generator"] = self.get_expert_generator(e)
 
-    def __call__(self, inputs: mx.array, jobs: list) -> tuple[mx.array, dict]:
-        # sample jobs:
-        # [[{14}, 1], [{}, 2]]
-        # for each job,
-        # job[0] indicates activated experts in this shard for inputs[i]
-        # job[1] indicates num additional calculations needed to avoid
-        # wire memory driver activity from surfacing
+    def __call__(self, x: mx.array, job: set, use_cache: bool) -> tuple[mx.array, dict]:
+
+        def get_weights(e):
+            if not use_cache:
+                self.ptr_cache[e] = next(self.experts[e]["generator"])
+
+            return self.ptr_cache[e]
 
         def mlp(x, v1, w1, w2, dst):
             y = (self.act_fn(x @ w1) * (x @ v1)) @ w2
@@ -182,76 +194,90 @@ class MoeShard:
         arr_map = {}
 
         for e in self.experts:
-            v1, w1, w2 = next(self.experts[e]["generator"])
-            for i, x in enumerate(inputs):
-                if e in jobs[i][0]:
-                    mlp(x, v1, w1, w2, expert_outs)
-                    arr_map[f"{i}.{e}"] = len(expert_outs) - 1
-                elif jobs[i][1] > 0:
-                    mlp(x, v1, w1, w2, expert_outs)
-                    jobs[i][1] -= 1
+            v1, w1, w2 = get_weights(e)
+            if e in job:
+                mlp(x, v1, w1, w2, expert_outs)
+                arr_map[e] = len(expert_outs) - 1
 
-        expert_outs = mx.stack(expert_outs, axis=0)
-        mx.eval(expert_outs)
+        if len(expert_outs) > 0:
+            expert_outs = mx.stack(expert_outs, axis=0)
+            mx.eval(expert_outs)
+        else:
+            expert_outs = mx.array(False)
 
         return expert_outs, arr_map
 
 
 class DistributedMoeBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
+        self.layer_num = layer_num
         self.d_model = args.d_model
-        self.url = args.ffn_config["shard_url"]
-        self.e_to_g = args.ffn_config["e_to_g"]
-        self.dlb_groups = args.ffn_config["dlb_groups"]
-        self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
-        self.num_experts_per_tok = args.ffn_config["moe_top_k"]
-        self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
-    def allocate_jobs(self, inds: list[list[int]]) -> list:
+        self.url = args.ffn_config["shard_url"]
+        self.expert_map = args.ffn_config["expert_map"]
+        self.n_oth_shards = len(args.ffn_config["shard_map"]) - 1
+        self.lru_cache = LruCache.fromkeys(args.ffn_config["shard_map"][self.url])
+
+        self.n_experts_in_cluster = args.ffn_config["moe_num_experts"]
+        self.num_experts_per_tok = args.ffn_config["moe_top_k"]
+        self.router = Router(args.d_model, self.n_experts_in_cluster)
+
+    def design_jobs(self, inds: list[list[int]]) -> list:
         jobs = []
-        job_map = []
+        max_loads = []
+        cnt = {e: 0 for e in range(self.n_experts_in_cluster)}
 
         for activated_experts in inds:
-            by_dlb_group = {}
-            by_shard = {}
-            jm = {}
-
+            job = set()
+            shard_loads = {}
             for e in activated_experts:
-                by_dlb_group.setdefault(self.e_to_g[e], []).append(e)
+                url = self.expert_map[e]
+                if url == self.url:
+                    job.add(e)
+                cnt[e] += 1
+                shard_loads[url] = shard_loads.get(url, 0) + 1
 
-            for g, es in by_dlb_group.items():
-                members = self.dlb_groups[g]["members"]
-                for i, e in enumerate(es):
-                    url = members[i % len(members)]
-                    by_shard.setdefault(url, set()).add(e)
-                    jm[e] = url
+            jobs.append(job)
+            max_loads.append(max(shard_loads.values()))
 
-            assigned = by_shard.get(self.url, set())
-            max_load = max(len(a) for a in by_shard.values())
-            jobs.append([assigned, max_load - len(assigned)])
-            job_map.append(jm)
+        uses_warmup = any(v == 0 for v in cnt.values())
 
-        return jobs, job_map
+        for i in range(len(jobs)):
+            for e in jobs[i]:
+                self.lru_cache.move_to_end(e)
 
-    def dispatch_and_combine(
+            if not uses_warmup:
+                continue
+
+            n_warmups = max_loads[i] - len(jobs[i])
+            for _ in range(n_warmups):
+                jobs[i].add(self.lru_cache.get_lru())
+
+        return jobs
+
+    def all_dispatch(
         self,
+        bi: int,
         expert_outs: mx.array,
         arr_map: dict,
+        shard_outs: dict,
         conn: connection.Connection,
     ):
-        shard_outs = {}
-        shard_outs[self.url] = {"expert_outs": expert_outs, "arr_map": arr_map}
+        shard_outs.setdefault(self.url, []).append((expert_outs, arr_map))
         conn.send_bytes(mx_to_bytes(expert_outs))
-        conn.send_bytes(pickle.dumps(arr_map))
+        conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
 
-        for _ in range(self.n_oth_shards):
-            oth_url = conn.recv()
-            oth_eo = bytes_to_mx(conn.recv_bytes())
-            oth_am = pickle.loads(conn.recv_bytes())
-            shard_outs[oth_url] = {"expert_outs": oth_eo, "arr_map": oth_am}
-
-        return shard_outs
+    def all_combine(
+        self,
+        batch_size: int,
+        shard_outs: dict,
+        conn: connection.Connection,
+    ):
+        for _ in range(batch_size * self.n_oth_shards):
+            expert_outs = bytes_to_mx(conn.recv_bytes())
+            url, li, bi, arr_map = pickle.loads(conn.recv_bytes())
+            shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
 
     def __call__(
         self,
@@ -260,8 +286,8 @@ class DistributedMoeBlock(nn.Module):
         conn: connection.Connection,
     ) -> mx.array:
         ne = self.num_experts_per_tok
-        orig_shape = x.shape
-        x = x.reshape(-1, x.shape[-1])
+        orig_shape = x.shape  # (sample_size, sequence_length, d_model)
+        x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
 
         gates = self.router(x)
         gates = mx.softmax(gates.astype(mx.float32), axis=-1)
@@ -273,19 +299,23 @@ class DistributedMoeBlock(nn.Module):
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs, job_map = self.allocate_jobs(inds)
+        jobs = self.design_jobs(inds)
+        batch_size = x.shape[0]
+        shard_outs = {}
 
-        expert_outs, arr_map = shard(x, jobs)
-        shard_outs = self.dispatch_and_combine(expert_outs, arr_map, conn)
+        for bi, xt in enumerate(x):
+            expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
+            self.all_dispatch(bi, expert_outs, arr_map, shard_outs, conn)
+
+        self.all_combine(batch_size, shard_outs, conn)
         y = []
 
-        for bi, st, it in zip(range(x.shape[0]), scores, inds):
+        for bi, st, it in zip(range(batch_size), scores, inds):
             yt = []
             for e in it:
-                url = job_map[bi][e]
-                expert_outs = shard_outs[url]["expert_outs"]
-                eoi = shard_outs[url]["arr_map"][f"{bi}.{e}"]
-                yt.append(expert_outs[eoi])
+                url = self.expert_map[e]
+                expert_outs, arr_map = shard_outs[url][bi]
+                yt.append(expert_outs[arr_map[e]])
 
             yt = mx.stack(yt, axis=-1)
             yt = (yt * st).sum(axis=-1)
@@ -296,9 +326,9 @@ class DistributedMoeBlock(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
-        self.ffn = DistributedMoeBlock(args)
+        self.ffn = DistributedMoeBlock(args, layer_num)
         self.norm_attn_norm = NormAttnNorm(args)
 
     def __call__(
@@ -321,7 +351,7 @@ class DBRX(nn.Module):
         super().__init__()
         self.vocab_size = args.vocab_size
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
-        self.blocks = [DecoderLayer(args) for _ in range(args.n_layers)]
+        self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.moe_shard = moe_shard
         self.conn = conn
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
@@ -343,7 +373,10 @@ class DBRX(nn.Module):
         if cache is None:
             cache = [None] * len(self.blocks)
 
+        # h.shape = (sample_size, sequence_length, d_model)
+        self.conn.send(h.shape[0] * T)  # let envoy know the batch size
         self.moe_shard.reset_expert_generators()
+
         for e, layer in enumerate(self.blocks):
             h, cache[e] = layer(h, self.moe_shard, self.conn, mask, cache[e])
 
@@ -358,14 +391,11 @@ class Warmer:
         self.moe_shard = moe_shard
         self.conn = conn
 
-        self.x = mx.ones((1, args.d_model), dtype=mx.bfloat16)
-        self.jobs = self.design_jobs(args.ffn_config["assigned_experts"])
+        self.x = mx.ones((args.d_model,), dtype=mx.bfloat16)
+        self.job = set(args.ffn_config["shard_map"][args.ffn_config["shard_url"]])
         mx.eval(self.x)
 
-    def design_jobs(self, my_experts: list) -> list:
-        return [[set(my_experts), 0]]
-
-    def sync_wth_oths(self):
+    def sync_w_oths(self):
         self.conn.send(True)  # signals that I am ready
         self.conn.recv()  # confirms that everyone else is done
 
@@ -373,8 +403,8 @@ class Warmer:
         # warms moe_shard for 1 token
         self.moe_shard.reset_expert_generators()
         for _ in range(self.n_layers):
-            self.moe_shard(self.x, self.jobs)
-            self.sync_wth_oths()
+            self.moe_shard(self.x, self.job, use_cache=False)
+            self.sync_w_oths()
 
 
 class Generator:
@@ -400,23 +430,22 @@ class Generator:
             raise
 
         model_args = ModelArgs.from_dict(config)
-        model_args.ffn_config["e_to_g"] = {}
+        model_args.ffn_config["expert_map"] = {}
 
-        for g, d in model_args.ffn_config["dlb_groups"].items():
-            for e in d["experts"]:
-                model_args.ffn_config["e_to_g"][e] = g
-
-            if model_args.ffn_config["shard_url"] in d["members"]:
-                model_args.ffn_config["assigned_experts"] = d["experts"]
+        for url, assigned_experts in model_args.ffn_config["shard_map"].items():
+            for e in assigned_experts:
+                model_args.ffn_config["expert_map"][e] = url
 
         return model_args
 
     def load_model_and_warmer(self) -> tuple[DBRX, Warmer]:
+        url = self.model_args.ffn_config["shard_url"]
+        assigned_experts = self.model_args.ffn_config["shard_map"][url]
         # sample:
         # {0: {"weights": mx.array([0, 1, 2, 3])}}
         experts = {
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
-            for e in self.model_args.ffn_config["assigned_experts"]
+            for e in assigned_experts
         }
         mx.eval(experts)
         moe_shard = MoeShard(experts)
@@ -517,6 +546,33 @@ def shard_main(
     logging.info("generator ready")
     generator.start()
 
+    # this might not be needed because generator.start() enters an infinite loop
+    conn.close()
+
+
+class DataBuffer:
+
+    def __init__(self, n_layers: int, n_oth_shards: int) -> None:
+        self.n_layers = n_layers
+        self.n_oth_shards = n_oth_shards
+
+        self.data = []
+        for _ in range(self.n_layers + 1):  # last bin for before_warm sync
+            self.data.append({})
+
+    def reset(self, li: int):
+        self.data[li] = {}
+
+    def put(self, d: Any, li: int, bi: int = 0) -> None:
+        self.data[li].setdefault(bi, []).append(d)
+
+    async def wait_til_full(self, li: int, bi: int = 0) -> list[Any]:
+        while (bi not in self.data[li]) or (
+            len(self.data[li][bi]) != self.n_oth_shards
+        ):
+            await asyncio.sleep(0)
+        return self.data[li][bi]
+
 
 class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
@@ -527,15 +583,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         self.config = self.get_config(model_path, config_filename)
 
         self.gen_queue = deque()
-        self.buffers = []
-        self.sync_complete_events = []
-        for _ in range(self.config["n_layers"] + 1):  # one extra for before_warm signal
-            self.buffers.append({})
-            self.sync_complete_events.append(asyncio.Event())
-
-    def reset_buffer_mechanism(self, i: int):
-        self.buffers[i] = {}
-        self.sync_complete_events[i].clear()
+        self.buffer = DataBuffer(self.config["n_layers"], len(self.config["oth_urls"]))
 
     def get_config(self, model_path: str, config_filename: str) -> dict:
         try:
@@ -551,27 +599,26 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             "oth_urls": [],
         }
 
-        for d in tmp["ffn_config"]["dlb_groups"].values():
-            for url in d["members"]:
-                if url == config["url"]:
-                    continue
-                config["oth_urls"].append(url)
+        for url in tmp["ffn_config"]["shard_map"]:
+            if url == config["url"]:
+                continue
+            config["oth_urls"].append(url)
 
         return config
 
-    async def broadcast_im_ready(
+    async def sync_w_oths(
         self,
-        layer_num: int,
-        oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub],
-        before_warming: bool,
-    ):
+        oth_shards: list,
+        li: int = None,
+        before_warming: bool = False,
+    ) -> None:
 
         async def signal(shard):
-            await shard.WarmingSync(
-                shard_envoy_pb2.Identifier(url=self.config["url"], layer_num=layer_num)
-            )
+            await shard.SignalReady(shard_envoy_pb2.Identifier(li=li))
 
-        if not before_warming:
+        if before_warming:
+            li = self.config["n_layers"]  # points to buffer's last bin
+        else:
             while not self.conn.poll():
                 await asyncio.sleep(0)
 
@@ -580,46 +627,40 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(signal(shard))
+            tg.create_task(self.buffer.wait_til_full(li))
 
-    async def all_dispatch(
-        self, layer_num: int, oth_shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub]
-    ):
+        self.buffer.reset(li)
 
-        async def send(shard, a_bytes, am_bytes):
-            await shard.Receive(
-                shard_envoy_pb2.ShardOuts(
-                    url=self.config["url"],
-                    layer_num=layer_num,
-                    data=a_bytes,
-                    arr_map=am_bytes,
-                )
-            )
+    async def all_dispatch(self, oth_shards: list) -> None:
+
+        async def dispatch(shard, data, metadata):
+            await shard.Receive(shard_envoy_pb2.ShardOuts(data=data, metadata=metadata))
 
         while not self.conn.poll():
             await asyncio.sleep(0)
 
-        a_bytes = self.conn.recv_bytes()
-        am_bytes = self.conn.recv_bytes()
+        data = self.conn.recv_bytes()
+        metadata = self.conn.recv_bytes()
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
-                tg.create_task(send(shard, a_bytes, am_bytes))
+                tg.create_task(dispatch(shard, data, metadata))
 
-    def signal_if_sync_completed(self, i: int):
-        if len(self.buffers[i]) == len(self.config["oth_urls"]):
-            self.sync_complete_events[i].set()
+    async def all_combine(self, li: int, batch_size: int):
+        coros = [self.buffer.wait_til_full(li, bi) for bi in range(batch_size)]
+        for coro in asyncio.as_completed(coros):
+            arr = await coro
+            for d, meta_d in arr:
+                self.conn.send_bytes(d)
+                self.conn.send_bytes(meta_d)
 
-    def WarmingSync(self, request: shard_envoy_pb2.Identifier, context):
-        self.buffers[request.layer_num][request.url] = True
-        self.signal_if_sync_completed(request.layer_num)
+    def SignalReady(self, request: shard_envoy_pb2.Identifier, context):
+        self.buffer.put(True, request.li)
         return shard_envoy_pb2.Empty()
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
-        self.buffers[request.layer_num][request.url] = {
-            "eo_bytes": request.data,
-            "am_bytes": request.arr_map,
-        }
-        self.signal_if_sync_completed(request.layer_num)
+        url, li, bi, arr_map = pickle.loads(request.metadata)
+        self.buffer.put((request.data, request.metadata), li, bi)
         return shard_envoy_pb2.Empty()
 
     async def Generate(self, request: shard_envoy_pb2.UsrIns, context):
@@ -639,13 +680,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
         global DEFAULT_STARTUP_WARMING_PERIOD
 
-        async def stay_warm(i, oth_shards, before_warming=False):
-            await self.broadcast_im_ready(i, oth_shards, before_warming)
-            await self.sync_complete_events[i].wait()
-            self.reset_buffer_mechanism(i)
-            if not before_warming:
-                self.conn.send(True)  # signals warmer that this layer is done
-
         async with AsyncExitStack() as es:
             oth_shards = []
             for url in self.config["oth_urls"]:
@@ -663,15 +697,13 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
             while True:
                 if len(self.gen_queue) == 0 or DEFAULT_STARTUP_WARMING_PERIOD > 0:
-
-                    await stay_warm(
-                        self.config["n_layers"], oth_shards, before_warming=True
-                    )
+                    await self.sync_w_oths(oth_shards, before_warming=True)
                     logging.info(f"warming...")
                     self.conn.send(False)  # signal Generator that this is a warming run
 
-                    for i in range(self.config["n_layers"]):
-                        await stay_warm(i, oth_shards)
+                    for li in range(self.config["n_layers"]):
+                        await self.sync_w_oths(oth_shards, li=li)
+                        self.conn.send(True)  # signals warmer that this layer is done
 
                     DEFAULT_STARTUP_WARMING_PERIOD -= 1
                     if DEFAULT_STARTUP_WARMING_PERIOD == 0:
@@ -685,16 +717,13 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 self.conn.send(gen["req"].max_tokens)
 
                 for _ in range(gen["req"].max_tokens):
-                    for i in range(self.config["n_layers"]):
-                        await self.all_dispatch(i, oth_shards)
-                        await self.sync_complete_events[i].wait()
+                    batch_size = self.conn.recv()
+                    for li in range(self.config["n_layers"]):
+                        for _bi in range(batch_size):
+                            await self.all_dispatch(oth_shards)
 
-                        for url, d in self.buffers[i].items():
-                            self.conn.send(url)
-                            self.conn.send_bytes(d["eo_bytes"])
-                            self.conn.send_bytes(d["am_bytes"])
-
-                        self.reset_buffer_mechanism(i)
+                        await self.all_combine(li, batch_size)
+                        self.buffer.reset(li)
 
                     continue_sig = self.conn.recv()
                     if not continue_sig:

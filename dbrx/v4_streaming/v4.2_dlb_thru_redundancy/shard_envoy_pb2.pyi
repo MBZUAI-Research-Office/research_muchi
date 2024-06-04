@@ -27,25 +27,19 @@ class UsrOuts(_message.Message):
     def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., response: _Optional[str] = ...) -> None: ...
 
 class ShardOuts(_message.Message):
-    __slots__ = ("url", "layer_num", "data", "arr_map")
-    URL_FIELD_NUMBER: _ClassVar[int]
-    LAYER_NUM_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("data", "metadata")
     DATA_FIELD_NUMBER: _ClassVar[int]
-    ARR_MAP_FIELD_NUMBER: _ClassVar[int]
-    url: str
-    layer_num: int
+    METADATA_FIELD_NUMBER: _ClassVar[int]
     data: bytes
-    arr_map: bytes
-    def __init__(self, url: _Optional[str] = ..., layer_num: _Optional[int] = ..., data: _Optional[bytes] = ..., arr_map: _Optional[bytes] = ...) -> None: ...
+    metadata: bytes
+    def __init__(self, data: _Optional[bytes] = ..., metadata: _Optional[bytes] = ...) -> None: ...
 
 class Empty(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
 class Identifier(_message.Message):
-    __slots__ = ("url", "layer_num")
-    URL_FIELD_NUMBER: _ClassVar[int]
-    LAYER_NUM_FIELD_NUMBER: _ClassVar[int]
-    url: str
-    layer_num: int
-    def __init__(self, url: _Optional[str] = ..., layer_num: _Optional[int] = ...) -> None: ...
+    __slots__ = ("li",)
+    LI_FIELD_NUMBER: _ClassVar[int]
+    li: int
+    def __init__(self, li: _Optional[int] = ...) -> None: ...
