@@ -271,18 +271,13 @@ class DistributedMoeBlock(nn.Module):
         arr_map: dict,
         shard_outs: dict,
         conn: connection.Connection,
-    ):
-        shard_outs.setdefault(self.url, []).append((expert_outs, arr_map))
+    ) -> None:
+        shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
         conn.send_bytes(mx_to_bytes(expert_outs))
         conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
 
-    def all_combine(
-        self,
-        batch_size: int,
-        shard_outs: dict,
-        conn: connection.Connection,
-    ):
-        for _ in range(batch_size * self.n_oth_shards):
+    def all_combine(self, shard_outs: dict, conn: connection.Connection) -> None:
+        for _ in range(self.n_oth_shards):
             expert_outs = bytes_to_mx(conn.recv_bytes())
             url, li, bi, arr_map = pickle.loads(conn.recv_bytes())
             shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
@@ -310,12 +305,20 @@ class DistributedMoeBlock(nn.Module):
         jobs, job_map = self.allocate_jobs(inds)
         batch_size = x.shape[0]
         shard_outs = {}
+        combine_cnt = 0
 
         for bi, xt in enumerate(x):
             expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
+
+            if conn.poll():
+                self.all_combine(shard_outs, conn)
+                combine_cnt += 1
+
             self.all_dispatch(bi, expert_outs, arr_map, shard_outs, conn)
 
-        self.all_combine(batch_size, shard_outs, conn)
+        for _ in range(batch_size - combine_cnt):
+            self.all_combine(shard_outs, conn)
+
         y = []
 
         for bi, st, it in zip(range(batch_size), scores, inds):
@@ -637,7 +640,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
         self.buffer.reset(li)
 
-    async def all_dispatch(self, oth_shards: list) -> None:
+    async def all_dispatch_n_combine(self, li: int, bi: int, oth_shards: list) -> None:
 
         async def dispatch(shard, data, metadata):
             await shard.Receive(shard_envoy_pb2.ShardOuts(data=data, metadata=metadata))
@@ -651,14 +654,11 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(dispatch(shard, data, metadata))
+            wait_task = tg.create_task(self.buffer.wait_til_full(li, bi))
 
-    async def all_combine(self, li: int, batch_size: int):
-        coros = [self.buffer.wait_til_full(li, bi) for bi in range(batch_size)]
-        for coro in asyncio.as_completed(coros):
-            arr = await coro
-            for d, meta_d in arr:
-                self.conn.send_bytes(d)
-                self.conn.send_bytes(meta_d)
+        for d, meta_d in wait_task.result():
+            self.conn.send_bytes(d)
+            self.conn.send_bytes(meta_d)
 
     def SignalReady(self, request: shard_envoy_pb2.Identifier, context):
         self.buffer.put(True, request.li)
@@ -725,10 +725,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 for _ in range(gen["req"].max_tokens):
                     batch_size = self.conn.recv()
                     for li in range(self.config["n_layers"]):
-                        for _bi in range(batch_size):
-                            await self.all_dispatch(oth_shards)
+                        for bi in range(batch_size):
+                            await self.all_dispatch_n_combine(li, bi, oth_shards)
 
-                        await self.all_combine(li, batch_size)
                         self.buffer.reset(li)
 
                     continue_sig = self.conn.recv()
