@@ -645,6 +645,12 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         async def dispatch(shard, data, metadata):
             await shard.Receive(shard_envoy_pb2.ShardOuts(data=data, metadata=metadata))
 
+        async def combine():
+            arr = await self.buffer.wait_til_full(li, bi)
+            for d, meta_d in arr:
+                self.conn.send_bytes(d)
+                self.conn.send_bytes(meta_d)
+
         while not self.conn.poll():
             await asyncio.sleep(0)
 
@@ -654,11 +660,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(dispatch(shard, data, metadata))
-            wait_task = tg.create_task(self.buffer.wait_til_full(li, bi))
-
-        for d, meta_d in wait_task.result():
-            self.conn.send_bytes(d)
-            self.conn.send_bytes(meta_d)
+            tg.create_task(combine())
 
     def SignalReady(self, request: shard_envoy_pb2.Identifier, context):
         self.buffer.put(True, request.li)
