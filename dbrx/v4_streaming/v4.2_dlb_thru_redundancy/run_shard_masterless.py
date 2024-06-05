@@ -120,7 +120,7 @@ def main():
     Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/v4_streaming/v4.2_dlb_thru_redundancy' Enter \;""")
     Cmd(
         f"""tmux send-keys -t 0 'python shard.py --port {args.port}"""
-        + f""" --model-path ~/dbrx-base/distributable/batch2"""
+        + f""" --model-path ~/dbrx-instruct/distributable/batch2"""
         + f""" --config-filename v4.2_shard_config.json' Enter \;""",
     )
 

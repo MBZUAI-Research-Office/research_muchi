@@ -1,9 +1,9 @@
 # Examples:
 #  launch all shards:
-#    python launch_shards_masterless.py --model-path ~/dbrx-base/distributable/batch2/
+#    python launch_shards_masterless.py --model-path ~/dbrx-instruct/distributable/batch2/
 #
 #  terminate all shards:
-#    python launch_shards_masterless.py --model-path ~/dbrx-base/distributable/batch2/ --terminate
+#    python launch_shards_masterless.py --model-path ~/dbrx-instruct/distributable/batch2/ --terminate
 import subprocess
 import time
 from types import SimpleNamespace
