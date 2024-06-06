@@ -34,6 +34,15 @@ def bytes_to_mx(a_bytes: bytes) -> mx.array:
     return arr
 
 
+def buffer_to_mx(buffer: io.BytesIO) -> mx.array:
+    # convert bytes to mx.array
+    arr = None
+    buffer.name = "xxx.npy"  # hack!
+    arr = mx.load(buffer)
+    assert arr is not None
+    return arr
+
+
 # def test_0():
 #     a = mx.random.normal((1, 6144), dtype=mx.bfloat16)
 #     print(f"{a=}")
