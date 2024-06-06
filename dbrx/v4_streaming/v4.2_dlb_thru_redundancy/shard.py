@@ -27,7 +27,7 @@ import mlx.nn as nn
 
 from transformers import AutoTokenizer
 
-from serialization_utils import mx_to_bytes, buffer_to_mx
+from serialization_utils import mx_to_bytes, bytes_to_mx
 
 DEFAULT_TEMP = 0.6
 DEFAULT_SEED = 7
@@ -288,9 +288,7 @@ class DistributedMoeBlock(nn.Module):
     ):
         shard_outs = {}
         for _ in range(batch_size * self.n_oth_shards):
-            with io.BytesIO() as buffer:
-                resv_conn.recv_bytes_into(buffer)
-                expert_outs = buffer_to_mx(buffer)
+            expert_outs = bytes_to_mx(resv_conn.recv_bytes())
             url, li, bi, arr_map = pickle.loads(resv_conn.recv_bytes())
             shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
         return shard_outs
