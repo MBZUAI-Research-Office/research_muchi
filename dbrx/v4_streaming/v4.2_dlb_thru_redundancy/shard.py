@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 import argparse
 import asyncio
+import concurrent.futures
 import inspect
+import io
 import json
 import logging
 import pickle
@@ -264,34 +266,40 @@ class DistributedMoeBlock(nn.Module):
 
         return jobs, job_map
 
-    def all_dispatch(
+    def call_shard_n_all_dispatch(
         self,
-        bi: int,
-        expert_outs: mx.array,
-        arr_map: dict,
-        shard_outs: dict,
-        conn: connection.Connection,
-    ):
-        shard_outs.setdefault(self.url, []).append((expert_outs, arr_map))
-        conn.send_bytes(mx_to_bytes(expert_outs))
-        conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
+        x: mx.array,
+        jobs: list[set],
+        shard: MoeShard,
+        send_conn: connection.Connection,
+    ) -> dict:
+        shard_outs = {}
+        for bi, xt in enumerate(x):
+            expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
+            shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
+            send_conn.send_bytes(mx_to_bytes(expert_outs))
+            send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
+        return shard_outs
 
     def all_combine(
         self,
         batch_size: int,
-        shard_outs: dict,
-        conn: connection.Connection,
+        resv_conn: connection.Connection,
     ):
+        shard_outs = {}
         for _ in range(batch_size * self.n_oth_shards):
-            expert_outs = bytes_to_mx(conn.recv_bytes())
-            url, li, bi, arr_map = pickle.loads(conn.recv_bytes())
+            expert_outs = bytes_to_mx(resv_conn.recv_bytes())
+            url, li, bi, arr_map = pickle.loads(resv_conn.recv_bytes())
             shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
+        return shard_outs
 
     def __call__(
         self,
         x: mx.array,
         shard: MoeShard,
-        conn: connection.Connection,
+        resv_conn: connection.Connection,
+        send_conn: connection.Connection,
+        executor: concurrent.futures.ThreadPoolExecutor,
     ) -> mx.array:
         ne = self.num_experts_per_tok
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
@@ -311,11 +319,13 @@ class DistributedMoeBlock(nn.Module):
         batch_size = x.shape[0]
         shard_outs = {}
 
-        for bi, xt in enumerate(x):
-            expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
-            self.all_dispatch(bi, expert_outs, arr_map, shard_outs, conn)
+        compute_fut = executor.submit(
+            self.call_shard_n_all_dispatch, x, jobs, shard, send_conn
+        )
+        comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
+        for fut in concurrent.futures.as_completed([compute_fut, comm_fut]):
+            shard_outs.update(fut.result())
 
-        self.all_combine(batch_size, shard_outs, conn)
         y = []
 
         for bi, st, it in zip(range(batch_size), scores, inds):
@@ -343,31 +353,39 @@ class DecoderLayer(nn.Module):
         self,
         x: mx.array,
         shard: MoeShard,
-        conn: connection.Connection,
+        resv_conn: connection.Connection,
+        send_conn: connection.Connection,
+        executor: concurrent.futures.ThreadPoolExecutor,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
         r, h, cache = self.norm_attn_norm(x, mask, cache)
-        out = self.ffn(h, shard, conn) + r
+        out = self.ffn(h, shard, resv_conn, send_conn, executor) + r
         return out, cache
 
 
 class DBRX(nn.Module):
     def __init__(
-        self, args: ModelArgs, moe_shard: MoeShard, conn: connection.Connection
+        self,
+        args: ModelArgs,
+        moe_shard: MoeShard,
+        resv_conn: connection.Connection,
+        send_conn: connection.Connection,
     ):
         super().__init__()
         self.vocab_size = args.vocab_size
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.moe_shard = moe_shard
-        self.conn = conn
+        self.resv_conn = resv_conn
+        self.send_conn = send_conn
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
         self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
 
     def __call__(
         self,
         inputs: mx.array,
+        executor: concurrent.futures.ThreadPoolExecutor,
         cache=None,
     ):
         h = self.wte(inputs)
@@ -382,26 +400,39 @@ class DBRX(nn.Module):
             cache = [None] * len(self.blocks)
 
         # h.shape = (sample_size, sequence_length, d_model)
-        self.conn.send(h.shape[0] * T)  # let envoy know the batch size
+        self.send_conn.send(h.shape[0] * T)  # let envoy know the batch size
         self.moe_shard.reset_expert_generators()
 
         for e, layer in enumerate(self.blocks):
-            h, cache[e] = layer(h, self.moe_shard, self.conn, mask, cache[e])
+            h, cache[e] = layer(
+                h,
+                self.moe_shard,
+                self.resv_conn,
+                self.send_conn,
+                executor,
+                mask,
+                cache[e],
+            )
 
         return self.lm_head(self.norm_f(h)), cache
 
 
 class Warmer:
     def __init__(
-        self, args: ModelArgs, moe_shard: MoeShard, conn: connection.Connection
+        self,
+        args: ModelArgs,
+        moe_shard: MoeShard,
+        resv_conn: connection.Connection,
+        send_conn: connection.Connection,
     ):
         self.n_layers = args.n_layers
         self.moe_shard = moe_shard
-        self.conn = conn
+        self.resv_conn = resv_conn
+        self.send_conn = send_conn
 
     def sync_w_oths(self):
-        self.conn.send(True)  # signals that I am ready
-        self.conn.recv()  # confirms that everyone else is done
+        self.send_conn.send(True)  # signals that I am ready
+        self.resv_conn.recv()  # confirms that everyone else is done
 
     def __call__(self):
         # warms moe_shard for 1 token
@@ -414,12 +445,17 @@ class Warmer:
 class Generator:
 
     def __init__(
-        self, model_path: str, config_filename: str, conn: connection.Connection
+        self,
+        model_path: str,
+        config_filename: str,
+        resv_conn: connection.Connection,
+        send_conn: connection.Connection,
     ) -> None:
         mx.random.seed(DEFAULT_SEED)
         self.model_path = Path(model_path)
         self.model_args = self.get_model_args(config_filename)
-        self.conn = conn
+        self.resv_conn = resv_conn
+        self.send_conn = send_conn
         self.model, self.warmer = self.load_model_and_warmer()
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path, trust_remote_code=True
@@ -455,19 +491,20 @@ class Generator:
         mx.eval(experts)
         moe_shard = MoeShard(experts)
 
-        model = DBRX(self.model_args, moe_shard, self.conn)
+        model = DBRX(self.model_args, moe_shard, self.resv_conn, self.send_conn)
         non_expert_weights = mx.load(str(self.model_path / f"non-expert.safetensors"))
         model.load_weights(list(non_expert_weights.items()))
         mx.eval(model.parameters())
         model.eval()
 
-        return model, Warmer(self.model_args, moe_shard, self.conn)
+        return model, Warmer(self.model_args, moe_shard, self.resv_conn, self.send_conn)
 
     def generate(
         self,
         prompt: str,
         max_tokens: int,
         temp: float,
+        executor: concurrent.futures.ThreadPoolExecutor,
     ):
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
@@ -492,7 +529,7 @@ class Generator:
         tic = time.perf_counter()
 
         for n in range(max_tokens):
-            logits, cache = self.model(y[None], cache=cache)
+            logits, cache = self.model(y[None], executor, cache=cache)
             logits = logits[:, -1, :]
             y = sample(logits)
 
@@ -501,7 +538,7 @@ class Generator:
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
             if token == self.tokenizer.eos_token_id:
-                self.conn.send(False)
+                self.send_conn.send(False)
                 break
             tokens.append(token)
 
@@ -511,7 +548,7 @@ class Generator:
                 tokens = []
                 token_strings.append(s)
 
-            self.conn.send(True)
+            self.send_conn.send(True)
 
         token_count = n + 1
         token_strings.append(
@@ -528,31 +565,36 @@ class Generator:
         )
 
     def start(self) -> None:
-        while True:
-            is_gen_run = self.conn.recv()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            while True:
+                is_gen_run = self.resv_conn.recv()
 
-            if not is_gen_run:
-                self.warmer()
-                continue
+                if not is_gen_run:
+                    self.warmer()
+                    continue
 
-            prompt = self.conn.recv()
-            max_tokens = self.conn.recv()
-            res = self.generate(prompt, max_tokens, DEFAULT_TEMP)
-            pprint.pp(res)
-            self.conn.send(res)
+                prompt = self.resv_conn.recv()
+                max_tokens = self.resv_conn.recv()
+                res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
+                pprint.pp(res)
+                self.send_conn.send(res)
 
 
 def shard_main(
-    model_path: str, config_filename: str, conn: connection.Connection
+    model_path: str,
+    config_filename: str,
+    resv_conn: connection.Connection,
+    send_conn: connection.Connection,
 ) -> None:
     logging.basicConfig(level=logging.INFO)
-    generator = Generator(model_path, config_filename, conn)
-    conn.send(True)  # signals envoy that it is ready
+    generator = Generator(model_path, config_filename, resv_conn, send_conn)
+    send_conn.send(True)  # signals envoy that it is ready
     logging.info("generator ready")
     generator.start()
 
     # this might not be needed because generator.start() enters an infinite loop
-    conn.close()
+    resv_conn.close()
+    send_conn.close()
 
 
 class DataBuffer:
@@ -582,9 +624,14 @@ class DataBuffer:
 class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
     def __init__(
-        self, model_path: str, config_filename: str, conn: connection.Connection
+        self,
+        model_path: str,
+        config_filename: str,
+        resv_conn: connection.Connection,
+        send_conn: connection.Connection,
     ) -> None:
-        self.conn = conn
+        self.resv_conn = resv_conn
+        self.send_conn = send_conn
         self.config = self.get_config(model_path, config_filename)
 
         self.gen_queue = deque()
@@ -625,10 +672,10 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         if before_warming:
             li = self.config["n_layers"]  # points to buffer's last bin
         else:
-            while not self.conn.poll():
+            while not self.resv_conn.poll():
                 await asyncio.sleep(0)
 
-            self.conn.recv()  # means warmer is done
+            self.resv_conn.recv()  # means warmer is done
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
@@ -637,28 +684,25 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
         self.buffer.reset(li)
 
-    async def all_dispatch(self, oth_shards: list) -> None:
+    async def all_dispatch_n_combine(self, li: int, bi: int, oth_shards: list) -> None:
 
         async def dispatch(shard, data, metadata):
             await shard.Receive(shard_envoy_pb2.ShardOuts(data=data, metadata=metadata))
 
-        while not self.conn.poll():
+        while not self.resv_conn.poll():
             await asyncio.sleep(0)
 
-        data = self.conn.recv_bytes()
-        metadata = self.conn.recv_bytes()
+        data = self.resv_conn.recv_bytes()
+        metadata = self.resv_conn.recv_bytes()
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
                 tg.create_task(dispatch(shard, data, metadata))
+            wait_task = tg.create_task(self.buffer.wait_til_full(li, bi))
 
-    async def all_combine(self, li: int, batch_size: int):
-        coros = [self.buffer.wait_til_full(li, bi) for bi in range(batch_size)]
-        for coro in asyncio.as_completed(coros):
-            arr = await coro
-            for d, meta_d in arr:
-                self.conn.send_bytes(d)
-                self.conn.send_bytes(meta_d)
+        for d, meta_d in wait_task.result():
+            self.send_conn.send_bytes(d)
+            self.send_conn.send_bytes(meta_d)
 
     def SignalReady(self, request: shard_envoy_pb2.Identifier, context):
         self.buffer.put(True, request.li)
@@ -705,11 +749,15 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 if len(self.gen_queue) == 0 or DEFAULT_STARTUP_WARMING_PERIOD > 0:
                     await self.sync_w_oths(oth_shards, before_warming=True)
                     logging.info(f"warming...")
-                    self.conn.send(False)  # signal Generator that this is a warming run
+                    self.send_conn.send(
+                        False
+                    )  # signal Generator that this is a warming run
 
                     for li in range(self.config["n_layers"]):
                         await self.sync_w_oths(oth_shards, li=li)
-                        self.conn.send(True)  # signals warmer that this layer is done
+                        self.send_conn.send(
+                            True
+                        )  # signals warmer that this layer is done
 
                     DEFAULT_STARTUP_WARMING_PERIOD -= 1
                     if DEFAULT_STARTUP_WARMING_PERIOD == 0:
@@ -717,31 +765,36 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                     continue
 
-                self.conn.send(True)  # signal Generator that this is a generate run
+                self.send_conn.send(
+                    True
+                )  # signal Generator that this is a generate run
                 gen = self.gen_queue[0]
-                self.conn.send(gen["req"].prompt)
-                self.conn.send(gen["req"].max_tokens)
+                self.send_conn.send(gen["req"].prompt)
+                self.send_conn.send(gen["req"].max_tokens)
 
                 for _ in range(gen["req"].max_tokens):
-                    batch_size = self.conn.recv()
+                    batch_size = self.resv_conn.recv()
                     for li in range(self.config["n_layers"]):
-                        for _bi in range(batch_size):
-                            await self.all_dispatch(oth_shards)
+                        for bi in range(batch_size):
+                            await self.all_dispatch_n_combine(li, bi, oth_shards)
 
-                        await self.all_combine(li, batch_size)
                         self.buffer.reset(li)
 
-                    continue_sig = self.conn.recv()
+                    continue_sig = self.resv_conn.recv()
                     if not continue_sig:
                         break
 
-                gen["resp"] = self.conn.recv()
+                gen["resp"] = self.resv_conn.recv()
                 gen["completed"].set()
                 self.gen_queue.popleft()
 
 
 async def serve(
-    port: int, model_path: str, config_filename: str, conn: connection.Connection
+    port: int,
+    model_path: str,
+    config_filename: str,
+    resv_conn: connection.Connection,
+    send_conn: connection.Connection,
 ):
     server = grpc.aio.server(
         options=[
@@ -749,14 +802,14 @@ async def serve(
             ("grpc.max_receive_message_length", -1),
         ]
     )
-    servicer = ShardEnvoyServicer(model_path, config_filename, conn)
+    servicer = ShardEnvoyServicer(model_path, config_filename, resv_conn, send_conn)
     shard_envoy_pb2_grpc.add_ShardEnvoyServicer_to_server(servicer, server)
     listen_addr = f"[::]:{port}"
     server.add_insecure_port(listen_addr)
     await server.start()
     logging.info(f"server started, listening on {listen_addr}")
 
-    conn.recv()  # wait for Generator to finish initializing before starting to warm up
+    resv_conn.recv()  # wait for Generator to finish initializing before starting to warm up
     await servicer.start()
 
     # copied from:
@@ -773,12 +826,18 @@ async def serve(
 
 
 def envoy_main(
-    port: int, model_path: str, config_filename: str, conn: connection.Connection
+    port: int,
+    model_path: str,
+    config_filename: str,
+    resv_conn: connection.Connection,
+    send_conn: connection.Connection,
 ):
     logging.basicConfig(level=logging.INFO)
     loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(serve(port, model_path, config_filename, conn))
+        loop.run_until_complete(
+            serve(port, model_path, config_filename, resv_conn, send_conn)
+        )
     finally:
         loop.run_until_complete(*_cleanup_coroutines)
         loop.close()
@@ -791,14 +850,16 @@ if __name__ == "__main__":
     parser.add_argument("--config-filename", type=str)
     args = parser.parse_args()
 
-    envoy_conn, shard_conn = multiprocessing.Pipe()
+    envoy_resv, envoy_send = multiprocessing.Pipe(duplex=False)
+    shard_resv, shard_send = multiprocessing.Pipe(duplex=False)
 
     envoy_p = multiprocessing.Process(
         target=envoy_main,
-        args=(args.port, args.model_path, args.config_filename, envoy_conn),
+        args=(args.port, args.model_path, args.config_filename, shard_resv, envoy_send),
     )
     shard_p = multiprocessing.Process(
-        target=shard_main, args=(args.model_path, args.config_filename, shard_conn)
+        target=shard_main,
+        args=(args.model_path, args.config_filename, envoy_resv, shard_send),
     )
 
     envoy_p.start()
