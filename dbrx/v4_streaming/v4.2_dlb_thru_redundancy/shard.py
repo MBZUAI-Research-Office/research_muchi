@@ -319,12 +319,18 @@ class DistributedMoeBlock(nn.Module):
         batch_size = x.shape[0]
         shard_outs = {}
 
+        # FOR EVALUATION
+        # print("-----pre-shard calc ended-----", flush=True)
+
         compute_fut = executor.submit(
             self.call_shard_n_all_dispatch, x, jobs, shard, send_conn
         )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
         for fut in concurrent.futures.as_completed([compute_fut, comm_fut]):
             shard_outs.update(fut.result())
+
+        # FOR EVALUATION
+        # print("-----shard calc ended-----", flush=True)
 
         y = []
 
@@ -388,6 +394,9 @@ class DBRX(nn.Module):
         executor: concurrent.futures.ThreadPoolExecutor,
         cache=None,
     ):
+        # FOR EVALUATION
+        # print("-----inference started-----", flush=True)
+
         h = self.wte(inputs)
 
         mask = None

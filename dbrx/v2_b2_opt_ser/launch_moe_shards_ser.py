@@ -1,9 +1,9 @@
 # Examples:
 #  launch all shards:
-#    python launch_moe_shards_ser.py --model-path ~/dbrx-base/distributable/batch2/
+#    python launch_moe_shards_ser.py --model-path ~/dbrx-instruct/distributable/batch2/
 #
 #  terminate all shards:
-#    python launch_moe_shards_ser.py --model-path ~/dbrx-base/distributable/batch2/ --terminate
+#    python launch_moe_shards_ser.py --model-path ~/dbrx-instruct/distributable/batch2/ --terminate
 import subprocess
 import time
 from types import SimpleNamespace
@@ -105,7 +105,7 @@ def main():
     parser.add_argument("--terminate", action="store_true")
     args = parser.parse_args()
     try:
-        with open(Path(args.model_path) / "driver_config.json", "r") as f:
+        with open(Path(args.model_path) / "v0_driver_config.json", "r") as f:
             config = json.load(f)
     except FileNotFoundError:
         raise

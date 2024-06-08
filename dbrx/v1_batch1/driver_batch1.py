@@ -265,10 +265,10 @@ class Driver:
 
     def get_model_args(self) -> ModelArgs:
         try:
-            with open(self.model_path / "driver_config.json", "r") as f:
+            with open(self.model_path / "v0_driver_config.json", "r") as f:
                 config = json.load(f)
         except FileNotFoundError:
-            logging.error(f"driver_config.json not found in {self.model_path}")
+            logging.error(f"v0_driver_config.json not found in {self.model_path}")
             raise
 
         model_args = ModelArgs.from_dict(config)
