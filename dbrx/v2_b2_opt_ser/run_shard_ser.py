@@ -115,18 +115,17 @@ def main():
         print(err, file=sys.stderr)
         sys.exit(1)
     Cmd("""tmux set-option -g mouse on""")
-    Cmd("""tmux split-window -hf zsh \;""")
-    Cmd("""tmux split-window -hf zsh \;""")
-    Cmd("""tmux split-window -hf zsh \;""")
+    for _ in range(len(ports) - 1):
+        Cmd("""tmux split-window -hf zsh \;""")
     Cmd("""tmux select-layout even-horizontal \;""")
     for e, port in enumerate(ports):
         Cmd(f"""tmux send-keys -t {e} 'clear' Enter \;""")
         Cmd(f"""tmux send-keys -t {e} 'conda activate dbrx_poc' Enter \;""")
-        Cmd(f"""tmux send-keys -t {e} 'cd ~/research_muchi/dbrx/b2_opt_ser' Enter \;""")
+        Cmd(f"""tmux send-keys -t {e} 'cd ~/research_muchi/dbrx/v2_b2_opt_ser' Enter \;""")
         Cmd(
             f"""tmux send-keys -t {e} 'python moe_shard_ser.py --port {port}"""
-            + f""" --model-path ~/dbrx-base/distributable/batch2"""
-            + f""" --config-filename moe_shard_config_{e}.json' Enter \;""",
+            + f""" --model-path ~/dbrx-instruct/distributable/batch2"""
+            + f""" --config-filename v0_moe_shard_config_{e}.json' Enter \;""",
         )
     # Cmd("""tmux -f /dev/null attach -t dbrx_poc""")
 
