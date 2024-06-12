@@ -88,7 +88,9 @@ class AttnWqkvOutProj:
         # es_sum.shape=(6144, 10752)
         # wqkv.shape=(8192, 6144)
         # out_proj.shape=(6144, 6144)
-        return next(self.wqkv["generator"]) @ (next(self.out_proj["generator"]) @ es_sum)
+        return next(self.wqkv["generator"]) @ (
+            next(self.out_proj["generator"]) @ es_sum
+        )
 
     def call_wqkv(self, x: mx.array) -> mx.array:
         return x @ next(self.wqkv["generator"]).T
@@ -544,13 +546,17 @@ class Generator:
         mx.eval(experts)
         moe_shard = MoeShard(experts)
 
-        model = DBRX(self.model_args, attn_outsourced, moe_shard, self.resv_conn, self.send_conn)
+        model = DBRX(
+            self.model_args, attn_outsourced, moe_shard, self.resv_conn, self.send_conn
+        )
         non_expert_weights = mx.load(str(self.model_path / f"non-expert.safetensors"))
         model.load_weights(list(non_expert_weights.items()))
         mx.eval(model.parameters())
         model.eval()
 
-        return model, Warmer(self.model_args, moe_shard, self.resv_conn, self.send_conn)
+        return model, Warmer(
+            self.model_args, attn_outsourced, moe_shard, self.resv_conn, self.send_conn
+        )
 
     def generate(
         self,
