@@ -30,7 +30,7 @@ from serialization_utils import mx_to_bytes, bytes_to_mx
 
 DEFAULT_TEMP = 0.6
 DEFAULT_SEED = 7
-DEFAULT_STARTUP_WARMING_PERIOD = 10  # unit: tokens
+DEFAULT_STARTUP_WARMING_PERIOD = 2  # unit: tokens
 
 # coroutines to be invoked when the event loop is shutting down
 # copied from:
@@ -96,7 +96,7 @@ class AttnWqkvOutProj:
 
     def light_warm(self) -> None:
         for xt, yt in zip(self.ptr_cache["wqkv"], self.ptr_cache["out_proj"]):
-            mx.eval(mx.add(xt, yt, stream=mx.gpu))
+            mx.eval(xt + yt)
             break
 
     def call_wqkv(self, x: mx.array) -> mx.array:
