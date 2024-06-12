@@ -315,7 +315,7 @@ class DistributedMoeBlock(nn.Module):
     ) -> dict:
         shard_outs = {}
         for bi, xt in enumerate(x):
-            time.sleep(0.0001)
+            time.sleep(0.01)
             expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
