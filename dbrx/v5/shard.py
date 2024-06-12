@@ -97,7 +97,6 @@ class AttnWqkvOutProj:
     def light_warm(self) -> None:
         for xt, yt in zip(self.ptr_cache["wqkv"], self.ptr_cache["out_proj"]):
             mx.eval(xt + yt)
-            return
 
     def call_wqkv(self, x: mx.array) -> mx.array:
         return x @ self.get_weight("wqkv")
@@ -316,13 +315,14 @@ class DistributedMoeBlock(nn.Module):
     ) -> dict:
         shard_outs = {}
         for bi, xt in enumerate(x):
+            logging.info("starting to warm")
             if bi > 0:
                 attn_outsourced.light_warm()
-            logging.info("here")
             expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
+            logging.info("finished sending to envoy")
         return shard_outs
 
     def all_combine(
