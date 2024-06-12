@@ -73,7 +73,6 @@ class AttnWqkvOutProj:
 
     def __init__(self, wqkv, out_proj) -> None:
         self.layers = {"wqkv": wqkv, "out_proj": out_proj}
-        self.ptr_cache = {}
 
     def reset_generators(self):
 
@@ -84,25 +83,11 @@ class AttnWqkvOutProj:
         for k in self.layers:
             self.layers[k]["generator"] = get_generator(k)
 
-    def get_weight(self, k: str) -> mx.array:
-        self.ptr_cache[k] = next(self.layers[k]["generator"])
-        return self.ptr_cache[k]
-
-    def heavy_warm(self, es_sum: mx.array) -> mx.array:
-        # es_sum.shape=(6144, 10752)
-        # wqkv.shape=(6144, 8192)
-        # out_proj.shape=(6144, 6144)
-        return self.get_weight("wqkv").T @ (self.get_weight("out_proj") @ es_sum)
-
-    def light_warm(self) -> None:
-        for xt, yt in zip(self.ptr_cache["wqkv"], self.ptr_cache["out_proj"]):
-            mx.eval(xt + yt)
-
     def call_wqkv(self, x: mx.array) -> mx.array:
-        return x @ self.get_weight("wqkv")
+        return x @ next(self.layers["wqkv"]["generator"])
 
     def call_out_proj(self, x: mx.array) -> mx.array:
-        return x @ self.get_weight("out_proj")
+        return x @ next(self.layers["out_proj"]["generator"])
 
 
 class AttnScore(nn.Module):
@@ -309,13 +294,11 @@ class DistributedMoeBlock(nn.Module):
         self,
         x: mx.array,
         jobs: list[set],
-        attn_outsourced: AttnWqkvOutProj,
         shard: MoeShard,
         send_conn: connection.Connection,
     ) -> dict:
         shard_outs = {}
         for bi, xt in enumerate(x):
-            time.sleep(0.01)
             expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
@@ -337,7 +320,6 @@ class DistributedMoeBlock(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        attn_outsourced: AttnWqkvOutProj,
         shard: MoeShard,
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
@@ -365,7 +347,7 @@ class DistributedMoeBlock(nn.Module):
         # print("-----pre-shard calc ended-----", flush=True)
 
         compute_fut = executor.submit(
-            self.call_shard_n_all_dispatch, x, jobs, attn_outsourced, shard, send_conn
+            self.call_shard_n_all_dispatch, x, jobs, shard, send_conn
         )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
         for fut in concurrent.futures.as_completed([compute_fut, comm_fut]):
@@ -409,7 +391,7 @@ class DecoderLayer(nn.Module):
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
         r, h, cache = self.norm_attn_norm(x, attn_outsourced, mask, cache)
-        out = self.ffn(h, attn_outsourced, shard, resv_conn, send_conn, executor) + r
+        out = self.ffn(h, shard, resv_conn, send_conn, executor) + r
         return out, cache
 
 
@@ -494,10 +476,9 @@ class Warmer:
 
     def __call__(self):
         # warms moe_shard for 1 token
-        self.attn_outsourced.reset_generators()
         self.moe_shard.reset_expert_generators(for_warming=True)
         for _ in range(self.n_layers):
-            mx.eval(self.attn_outsourced.heavy_warm(self.moe_shard.warm()))
+            mx.eval(self.moe_shard.warm())
             self.sync_w_oths()
 
 
