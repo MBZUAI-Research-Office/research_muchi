@@ -76,6 +76,20 @@ class DistributedDBRX(nn.Module):
         return mx.array(False)
 
 
+class SimpleMLP:
+
+    def __init__(self, ei: int, weights: dict) -> None:
+        self.ei = ei
+        self.weights = weights
+
+    def __call__(self, li: int, x: mx.array) -> mx.array:
+
+        def W(wi: str) -> mx.array:
+            return self.weights[f"blocks.{li}.experts.{self.ei}.{wi}.weight"]
+
+        return ((x @ W("w1").T) * (x @ W("v1").T)) @ W("w2")
+
+
 class Test:
 
     def __init__(self, model_path: str, config_filename: str) -> None:
@@ -115,7 +129,23 @@ class Test:
 
         return model
 
-    def start(self):
+    def start_0(self):
+        n_tokens = 10
+        n_layers = 40
+        x = mx.ones((1, 6144), dtype=mx.bfloat16)
+        mx.eval(x)
+
+        for i in range(n_tokens):
+            tic = time.perf_counter_ns()
+
+            for j in range(n_layers):
+                mx.eval(self.model(j, [8], x))
+
+            toc = time.perf_counter_ns()
+            print(f"avg latency per token: {(toc - tic) / 1000**2} ms")
+            time.sleep(1)
+
+    def start_1(self):
         n_tokens = 256
         n_layers = 40
         x = mx.ones((1, 6144), dtype=mx.bfloat16)
@@ -149,6 +179,34 @@ class Test:
         print(selection_stats)
 
 
+class SimpleTest:
+
+    def __init__(self, model_path: str, ei: int) -> None:
+        self.model_path = Path(model_path)
+        self.model = self.load_model(ei)
+
+    def load_model(self, ei: int) -> SimpleMLP:
+        weights = mx.load(str(self.model_path / f"expert{ei}.safetensors"))
+        mx.eval(weights)
+        return SimpleMLP(ei, weights)
+
+    def start(self) -> None:
+        n_tokens = 10
+        n_layers = 40
+        x = mx.ones((1, 6144), dtype=mx.bfloat16)
+        mx.eval(x)
+
+        for i in range(n_tokens):
+            tic = time.perf_counter_ns()
+
+            for j in range(n_layers):
+                mx.eval(self.model(j, x))
+
+            toc = time.perf_counter_ns()
+            print(f"avg latency per token: {(toc - tic) / 1000**2} ms")
+            time.sleep(1)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", type=str)
@@ -156,5 +214,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    test = Test(args.model_path, args.config_filename)
+    # test = Test(args.model_path, args.config_filename)
+    # test.start_0()
+
+    test = SimpleTest(args.model_path, 0)
     test.start()
