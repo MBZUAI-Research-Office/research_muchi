@@ -373,8 +373,8 @@ class Driver:
             f"Generation: {n - 1} tokens in {gen_time} seconds "
             + f"= {((n - 1) / gen_time):.3f} t/s"
         )
-        print(f"avg expert {statistics.mean(LOGS["expert"][40:]) / (1000 ** 2)} ms")
-        print(f"avg total {statistics.mean(LOGS["total"][40:]) / (1000 ** 2)} ms")
+        print(f"avg expert {statistics.mean(LOGS['expert'][40:]) / (1000 ** 2)} ms")
+        print(f"avg total {statistics.mean(LOGS['total'][40:]) / (1000 ** 2)} ms")
 
     async def start(self, prompt: str, max_tokens: int, temp: float) -> None:
         async with AsyncExitStack() as es:
