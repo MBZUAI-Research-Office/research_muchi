@@ -38,6 +38,11 @@ DEFAULT_STARTUP_WARMING_PERIOD = 10  # unit: tokens
 # https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
 _cleanup_coroutines = []
 
+import statistics
+LOGS = {
+    "expert": [],
+    "comm": []
+}
 
 @dataclass
 class ModelArgs:
@@ -273,25 +278,31 @@ class DistributedMoeBlock(nn.Module):
         shard: MoeShard,
         send_conn: connection.Connection,
     ) -> dict:
+        tic = time.perf_counter_ns()
+
         shard_outs = {}
         for bi, xt in enumerate(x):
             expert_outs, arr_map = shard(xt, jobs[bi], bool(bi > 0))
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
-        return shard_outs
+
+        return shard_outs, time.perf_counter_ns() - tic
 
     def all_combine(
         self,
         batch_size: int,
         resv_conn: connection.Connection,
     ):
+        tic = time.perf_counter_ns()
+
         shard_outs = {}
         for _ in range(batch_size * self.n_oth_shards):
             expert_outs = bytes_to_mx(resv_conn.recv_bytes())
             url, li, bi, arr_map = pickle.loads(resv_conn.recv_bytes())
             shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
-        return shard_outs
+
+        return shard_outs, time.perf_counter_ns() - tic
 
     def __call__(
         self,
@@ -319,18 +330,15 @@ class DistributedMoeBlock(nn.Module):
         batch_size = x.shape[0]
         shard_outs = {}
 
-        # FOR EVALUATION
-        # print("-----pre-shard calc ended-----", flush=True)
-
         compute_fut = executor.submit(
             self.call_shard_n_all_dispatch, x, jobs, shard, send_conn
         )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
-        for fut in concurrent.futures.as_completed([compute_fut, comm_fut]):
-            shard_outs.update(fut.result())
-
-        # FOR EVALUATION
-        # print("-----shard calc ended-----", flush=True)
+        fut_map = {compute_fut: "expert", comm_fut: "comm"}
+        for fut in concurrent.futures.as_completed(fut_map):
+            so, lat = fut.result()
+            shard_outs.update(so)
+            LOGS[fut_map[fut]].append(lat)
 
         y = []
 
@@ -394,9 +402,6 @@ class DBRX(nn.Module):
         executor: concurrent.futures.ThreadPoolExecutor,
         cache=None,
     ):
-        # FOR EVALUATION
-        # print("-----inference started-----", flush=True)
-
         h = self.wte(inputs)
 
         mask = None
@@ -586,6 +591,8 @@ class Generator:
                 max_tokens = self.resv_conn.recv()
                 res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
                 pprint.pp(res)
+                logging.info(f"avg expert: {statistics.mean(LOGS['expert']) / (1000 ** 2)} ms")
+                logging.info(f"avg comm: {statistics.mean(LOGS['comm']) / (1000 ** 2)} ms")
                 self.send_conn.send(res)
 
 
