@@ -77,7 +77,7 @@ class MoeShardServicer(moe_shard_ser_pb2_grpc.MoeShardServicer):
         inputs = bytes_to_mx(request.data)
         outputs = self.model(inputs)
         return moe_shard_ser_pb2.Outputs(
-            data=mx_to_bytes(outputs), start=tic, end=time.perf_counter_ns()
+            data=mx_to_bytes(outputs), exec_time=time.perf_counter_ns() - tic
         )
 
     def get_model_args(self, config_filename: str) -> dict:

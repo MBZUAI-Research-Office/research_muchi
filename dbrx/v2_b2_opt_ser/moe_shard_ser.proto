@@ -10,6 +10,5 @@ message Inputs {
 
 message Outputs {
   bytes data = 1;
-  double start = 2;
-  double end = 3;
+  float exec_time = 2;
 }

@@ -156,7 +156,7 @@ class DistributedSparseMoeBlock(nn.Module):
         x_bytes: bytes,  # x.shape == (batch_size, self.d_model)
     ):
         outputs = await shard.Execute(moe_shard_ser_pb2.Inputs(data=x_bytes))
-        return bytes_to_mx(outputs.data), outputs.start, outputs.end
+        return bytes_to_mx(outputs.data), outputs.exec_time
 
     async def __call__(self, x: mx.array) -> mx.array:
         ne = self.num_experts_per_tok
@@ -185,10 +185,9 @@ class DistributedSparseMoeBlock(nn.Module):
                 exec_tasks[url] = task
 
         toc = time.perf_counter_ns()
-        comm0 = max(task.result()[1] for task in exec_tasks.values()) - tic
-        comm1 = toc - max(task.result()[2] for task in exec_tasks.values())
-        LOGS["expert"].append((toc - tic) - (comm0 + comm1))
-        LOGS["comm"].append(comm0 + comm1)
+        expert_latency = statistics.mean(task.result()[1] for task in exec_tasks.values())
+        LOGS["expert"].append(expert_latency)
+        LOGS["comm"].append((toc - tic) - expert_latency)
 
         for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
             yt = []
