@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16moe_shard_batch1.proto\"D\n\x06Inputs\x12\x11\n\tblock_num\x18\x01 \x01(\x05\x12\x19\n\x11\x61\x63tivated_experts\x18\x02 \x01(\x0c\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\"\x17\n\x07Outputs\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x32*\n\x08MoeShard\x12\x1e\n\x07\x45xecute\x12\x07.Inputs\x1a\x08.Outputs\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16moe_shard_batch1.proto\"D\n\x06Inputs\x12\x11\n\tblock_num\x18\x01 \x01(\x05\x12\x19\n\x11\x61\x63tivated_experts\x18\x02 \x01(\x0c\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\"*\n\x07Outputs\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x11\n\texec_time\x18\x02 \x01(\x02\x32*\n\x08MoeShard\x12\x1e\n\x07\x45xecute\x12\x07.Inputs\x1a\x08.Outputs\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -24,7 +24,7 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['_INPUTS']._serialized_start=26
   _globals['_INPUTS']._serialized_end=94
   _globals['_OUTPUTS']._serialized_start=96
-  _globals['_OUTPUTS']._serialized_end=119
-  _globals['_MOESHARD']._serialized_start=121
-  _globals['_MOESHARD']._serialized_end=163
+  _globals['_OUTPUTS']._serialized_end=138
+  _globals['_MOESHARD']._serialized_start=140
+  _globals['_MOESHARD']._serialized_end=182
 # @@protoc_insertion_point(module_scope)

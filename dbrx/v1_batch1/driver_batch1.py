@@ -29,7 +29,7 @@ DEFAULT_TEMP = 0.6
 
 import statistics
 
-LOGS = {"expert": [], "total": []}
+LOGS = {"expert": [], "comm": []}
 
 
 @dataclass
@@ -168,10 +168,10 @@ class DistributedSparseMoeBlock(nn.Module):
             )
         )
         # reshape because np.frombuffer() interprets a buffer as a 1-dimensional array
-        outputs = np.frombuffer(outputs.data, dtype=np.float32).reshape(
+        arr = np.frombuffer(outputs.data, dtype=np.float32).reshape(
             (len(activated_experts), self.d_model)
         )
-        return mx.array(outputs, dtype=mx.bfloat16)
+        return mx.array(arr, dtype=mx.bfloat16), outputs.exec_time
 
     async def __call__(self, x: mx.array, block_num: int) -> mx.array:
         ne = self.num_experts_per_tok
@@ -206,13 +206,14 @@ class DistributedSparseMoeBlock(nn.Module):
                     for si, activated_experts in shard_to_experts.items()
                 ]
 
-            LOGS["total"].append(time.perf_counter_ns() - tic)
-            LOGS["expert"].append(
-                statistics.mean(task.result()[1] for task in exec_tasks.values())
-            )
+            # only applicable when num prompt tokens is 1
+            toc = time.perf_counter_ns()
+            expert_latency = statistics.mean(task.result()[1] for task in shard_tasks)
+            LOGS["expert"].append(expert_latency)
+            LOGS["comm"].append((toc - tic) - expert_latency)
 
             yt = mx.stack(
-                mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1
+                mx.concatenate([task.result()[0] for task in shard_tasks], axis=0), axis=-1
             )
             yt = (yt * st).sum(axis=-1)
             y.append(yt)
@@ -389,6 +390,9 @@ class Driver:
             f"Generation: {n - 1} tokens in {gen_time} seconds "
             + f"= {((n - 1) / gen_time):.3f} t/s"
         )
+        print(f"avg expert {statistics.mean(LOGS['expert'][40:]) / (1000 ** 2)} ms")
+        print(f"avg comm {statistics.mean(LOGS['comm'][40:]) / (1000 ** 2)} ms")
+        print(f"n samples: {len(LOGS['expert']) - 40}")
 
     async def start(self, prompt: str, max_tokens: int, temp: float) -> None:
         async with AsyncExitStack() as es:
