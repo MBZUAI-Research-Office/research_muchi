@@ -11,11 +11,9 @@ class Inputs(_message.Message):
     def __init__(self, data: _Optional[bytes] = ...) -> None: ...
 
 class Outputs(_message.Message):
-    __slots__ = ("data", "start", "end")
+    __slots__ = ("data", "exec_time")
     DATA_FIELD_NUMBER: _ClassVar[int]
-    START_FIELD_NUMBER: _ClassVar[int]
-    END_FIELD_NUMBER: _ClassVar[int]
+    EXEC_TIME_FIELD_NUMBER: _ClassVar[int]
     data: bytes
-    start: float
-    end: float
-    def __init__(self, data: _Optional[bytes] = ..., start: _Optional[float] = ..., end: _Optional[float] = ...) -> None: ...
+    exec_time: float
+    def __init__(self, data: _Optional[bytes] = ..., exec_time: _Optional[float] = ...) -> None: ...
