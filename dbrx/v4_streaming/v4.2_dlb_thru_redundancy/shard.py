@@ -41,7 +41,8 @@ _cleanup_coroutines = []
 import statistics
 LOGS = {
     "expert": [],
-    "comm": []
+    "comm": [],
+    "total": []
 }
 
 @dataclass
@@ -330,6 +331,8 @@ class DistributedMoeBlock(nn.Module):
         batch_size = x.shape[0]
         shard_outs = {}
 
+        tic = time.perf_counter_ns()
+
         compute_fut = executor.submit(
             self.call_shard_n_all_dispatch, x, jobs, shard, send_conn
         )
@@ -339,6 +342,8 @@ class DistributedMoeBlock(nn.Module):
             so, lat = fut.result()
             shard_outs.update(so)
             LOGS[fut_map[fut]].append(lat)
+
+        LOGS["total"].append(time.perf_counter_ns() - tic)
 
         y = []
 
@@ -591,8 +596,10 @@ class Generator:
                 max_tokens = self.resv_conn.recv()
                 res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
                 pprint.pp(res)
-                logging.info(f"avg expert: {statistics.mean(LOGS['expert']) / (1000 ** 2)} ms")
-                logging.info(f"avg comm: {statistics.mean(LOGS['comm']) / (1000 ** 2)} ms")
+                logging.info(f"avg expert: {statistics.mean(LOGS['expert'][1:]) / (1000 ** 2)} ms")
+                logging.info(f"avg comm: {statistics.mean(LOGS['comm'][1:]) / (1000 ** 2)} ms")
+                logging.info(f"total: {statistics.mean(LOGS['total'][1:]) / (1000 ** 2)} ms")
+                logging.info(f"n samples: {len(LOGS['expert']) - 1}")
                 self.send_conn.send(res)
 
 
