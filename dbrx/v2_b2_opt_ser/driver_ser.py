@@ -27,6 +27,10 @@ DEFAULT_PROMPT = "hello"
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 
+import statistics
+
+LOGS = {"expert": [], "total": []}
+
 
 @dataclass
 class ModelArgs:
@@ -152,7 +156,7 @@ class DistributedSparseMoeBlock(nn.Module):
         x_bytes: bytes,  # x.shape == (batch_size, self.d_model)
     ):
         outputs = await shard.Execute(moe_shard_ser_pb2.Inputs(data=x_bytes))
-        return bytes_to_mx(outputs.data)
+        return bytes_to_mx(outputs.data), outputs.exec_time
 
     async def __call__(self, x: mx.array) -> mx.array:
         ne = self.num_experts_per_tok
@@ -172,8 +176,7 @@ class DistributedSparseMoeBlock(nn.Module):
         y = []
         batch_size = x.shape[0]
 
-        # FOR EVALUATION
-        print("-----pre-shard calc ended-----", flush=True)
+        tic = time.perf_counter_ns()
 
         async with asyncio.TaskGroup() as tg:
             exec_tasks = {}
@@ -181,15 +184,17 @@ class DistributedSparseMoeBlock(nn.Module):
                 task = tg.create_task(self.execute_on_shard(d["shard"], x_bytes))
                 exec_tasks[url] = task
 
-        # FOR EVALUATION
-        print("-----shard calc ended-----", flush=True)
+        LOGS["total"].append(time.perf_counter_ns() - tic)
+        LOGS["expert"].append(
+            statistics.mean(task.result()[1] for task in exec_tasks.values())
+        )
 
         for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
             yt = []
             for e in it:
                 url = self.expert_to_url[e]
                 ei = self.moe_shard_map[url]["expert_to_i"][e]
-                res = exec_tasks[url].result()[bi, ei]
+                res = exec_tasks[url].result()[0][bi, ei]
                 yt.append(res)
 
             yt = mx.stack(yt, axis=-1)
@@ -231,9 +236,6 @@ class DistributedDBRX(nn.Module):
         inputs: mx.array,
         cache=None,
     ):
-        # FOR EVALUATION
-        print("-----inference started-----", flush=True)
-
         h = self.wte(inputs)
 
         mask = None
@@ -371,6 +373,8 @@ class Driver:
             f"Generation: {n - 1} tokens in {gen_time} seconds "
             + f"= {((n - 1) / gen_time):.3f} t/s"
         )
+        print(f"avg expert {statistics.mean(LOGS["expert"][40:]) / (1000 ** 2)} ms")
+        print(f"avg total {statistics.mean(LOGS["total"][40:]) / (1000 ** 2)} ms")
 
     async def start(self, prompt: str, max_tokens: int, temp: float) -> None:
         async with AsyncExitStack() as es:
