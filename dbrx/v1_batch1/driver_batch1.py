@@ -27,6 +27,10 @@ DEFAULT_PROMPT = "hello"
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 
+import statistics
+
+LOGS = {"expert": [], "total": []}
+
 
 @dataclass
 class ModelArgs:
@@ -190,6 +194,8 @@ class DistributedSparseMoeBlock(nn.Module):
             for e in it:
                 shard_to_experts.setdefault(self.expert_to_shard[e], []).append(e)
 
+            tic = time.perf_counter_ns()
+
             async with asyncio.TaskGroup() as tg:
                 shard_tasks = [
                     tg.create_task(
@@ -199,6 +205,11 @@ class DistributedSparseMoeBlock(nn.Module):
                     )
                     for si, activated_experts in shard_to_experts.items()
                 ]
+
+            LOGS["total"].append(time.perf_counter_ns() - tic)
+            LOGS["expert"].append(
+                statistics.mean(task.result()[1] for task in exec_tasks.values())
+            )
 
             yt = mx.stack(
                 mx.concatenate([task.result() for task in shard_tasks], axis=0), axis=-1
