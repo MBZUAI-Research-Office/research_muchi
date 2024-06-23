@@ -206,14 +206,14 @@ class DistributedSparseMoeBlock(nn.Module):
                     for si, activated_experts in shard_to_experts.items()
                 ]
 
-            # only applicable when num prompt tokens is 1
             toc = time.perf_counter_ns()
             expert_latency = statistics.mean(task.result()[1] for task in shard_tasks)
             LOGS["expert"].append(expert_latency)
             LOGS["comm"].append((toc - tic) - expert_latency)
 
             yt = mx.stack(
-                mx.concatenate([task.result()[0] for task in shard_tasks], axis=0), axis=-1
+                mx.concatenate([task.result()[0] for task in shard_tasks], axis=0),
+                axis=-1,
             )
             yt = (yt * st).sum(axis=-1)
             y.append(yt)
@@ -390,9 +390,9 @@ class Driver:
             f"Generation: {n - 1} tokens in {gen_time} seconds "
             + f"= {((n - 1) / gen_time):.3f} t/s"
         )
-        print(f"avg expert {statistics.mean(LOGS['expert'][40:]) / (1000 ** 2)} ms")
-        print(f"avg comm {statistics.mean(LOGS['comm'][40:]) / (1000 ** 2)} ms")
-        print(f"n samples: {len(LOGS['expert']) - 40}")
+        logs_skip = -40 * (n - 1)
+        print(f"avg expert {statistics.mean(LOGS['expert'][logs_skip:]) / (1000 ** 2)} ms")
+        print(f"avg comm {statistics.mean(LOGS['comm'][logs_skip:]) / (1000 ** 2)} ms")
 
     async def start(self, prompt: str, max_tokens: int, temp: float) -> None:
         async with AsyncExitStack() as es:
