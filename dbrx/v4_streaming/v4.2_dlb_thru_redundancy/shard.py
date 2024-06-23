@@ -596,10 +596,10 @@ class Generator:
                 max_tokens = self.resv_conn.recv()
                 res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
                 pprint.pp(res)
-                logging.info(f"avg expert: {statistics.mean(LOGS['expert'][1:]) / (1000 ** 2)} ms")
-                logging.info(f"avg comm: {statistics.mean(LOGS['comm'][1:]) / (1000 ** 2)} ms")
-                logging.info(f"total: {statistics.mean(LOGS['total'][1:]) / (1000 ** 2)} ms")
-                logging.info(f"n samples: {len(LOGS['expert']) - 1}")
+                logging.info(f"avg expert: {statistics.mean(LOGS['expert'][40:]) / (1000 ** 2)} ms")
+                logging.info(f"avg comm: {statistics.mean(LOGS['comm'][40:]) / (1000 ** 2)} ms")
+                logging.info(f"total: {statistics.mean(LOGS['total'][40:]) / (1000 ** 2)} ms")
+                logging.info(f"n samples: {len(LOGS['expert']) - 40}")
                 self.send_conn.send(res)
 
 
