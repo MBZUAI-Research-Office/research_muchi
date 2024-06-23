@@ -29,7 +29,7 @@ DEFAULT_TEMP = 0.6
 
 import statistics
 
-LOGS = {"expert": [], "total": []}
+LOGS = {"expert": [], "comm": []}
 
 
 @dataclass
@@ -156,7 +156,7 @@ class DistributedSparseMoeBlock(nn.Module):
         x_bytes: bytes,  # x.shape == (batch_size, self.d_model)
     ):
         outputs = await shard.Execute(moe_shard_ser_pb2.Inputs(data=x_bytes))
-        return bytes_to_mx(outputs.data), outputs.exec_time
+        return bytes_to_mx(outputs.data), outputs.start, outputs.end
 
     async def __call__(self, x: mx.array) -> mx.array:
         ne = self.num_experts_per_tok
@@ -184,10 +184,11 @@ class DistributedSparseMoeBlock(nn.Module):
                 task = tg.create_task(self.execute_on_shard(d["shard"], x_bytes))
                 exec_tasks[url] = task
 
-        LOGS["total"].append(time.perf_counter_ns() - tic)
-        LOGS["expert"].append(
-            statistics.mean(task.result()[1] for task in exec_tasks.values())
-        )
+        toc = time.perf_counter_ns()
+        comm0 = max(task.result()[1] for task in exec_tasks.values()) - tic
+        comm1 = toc - max(task.result()[2] for task in exec_tasks.values())
+        LOGS["expert"].append((toc - tic) - (comm0 + comm1))
+        LOGS["comm"].append(comm0 + comm1)
 
         for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
             yt = []
@@ -374,7 +375,7 @@ class Driver:
             + f"= {((n - 1) / gen_time):.3f} t/s"
         )
         print(f"avg expert {statistics.mean(LOGS['expert'][40:]) / (1000 ** 2)} ms")
-        print(f"avg total {statistics.mean(LOGS['total'][40:]) / (1000 ** 2)} ms")
+        print(f"avg comm {statistics.mean(LOGS['comm'][40:]) / (1000 ** 2)} ms")
 
     async def start(self, prompt: str, max_tokens: int, temp: float) -> None:
         async with AsyncExitStack() as es:
