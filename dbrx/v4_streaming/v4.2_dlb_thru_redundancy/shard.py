@@ -216,10 +216,8 @@ class MoeShard:
                 mlp(x, v1, w1, w2, expert_outs)
                 arr_map[e] = len(expert_outs) - 1
 
-        expert_outs = mx.stack(expert_outs, axis=0)
         mx.eval(expert_outs)
-
-        return expert_outs, arr_map
+        return mx.stack(expert_outs, axis=0), arr_map
 
 
 class DistributedMoeBlock(nn.Module):
