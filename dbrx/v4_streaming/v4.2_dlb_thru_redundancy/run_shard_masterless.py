@@ -108,7 +108,7 @@ def main():
         return
 
     rc, out, err = Cmd(
-        """tmux -f /dev/null new-session -s dbrx_poc -n experts -d zsh \;"""
+        """tmux -f /dev/null new-session -s dbrx_enhanced -n experts -d zsh \;"""
     )
     if rc != 0:
         print(err, file=sys.stderr)
@@ -116,7 +116,7 @@ def main():
     Cmd("""tmux set-option -g mouse on""")
 
     Cmd(f"""tmux send-keys -t 0 'clear' Enter \;""")
-    Cmd(f"""tmux send-keys -t 0 'conda activate dbrx_poc' Enter \;""")
+    Cmd(f"""tmux send-keys -t 0 'conda activate dbrx_enhanced' Enter \;""")
     Cmd(f"""tmux send-keys -t 0 'cd ~/research_muchi/dbrx/v4_streaming/v4.2_dlb_thru_redundancy' Enter \;""")
     Cmd(
         f"""tmux send-keys -t 0 'python shard.py --port {args.port}"""
