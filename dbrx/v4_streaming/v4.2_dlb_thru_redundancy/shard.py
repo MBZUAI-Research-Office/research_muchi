@@ -598,17 +598,14 @@ class Generator:
                 pprint.pp(res)
 
                 for k in ["expert", "comm", "total"]:
-                    LOGS[k] = LOGS[k][LOGS["prev_len"] + 40:]
+                    LOGS[k] = LOGS[k][LOGS["prev_len"] + 40 :]
                 LOGS["prev_len"] = len(LOGS["expert"])
-                logging.info(
-                    f"avg expert: {statistics.mean(LOGS['expert']) / (1000 ** 2)} ms"
-                )
-                logging.info(
-                    f"avg comm: {statistics.mean(LOGS['comm']) / (1000 ** 2)} ms"
-                )
-                logging.info(
-                    f"total: {statistics.mean(LOGS['total']) / (1000 ** 2)} ms"
-                )
+                avg_moe_lat = statistics.mean(LOGS["expert"]) / (1000**2)
+                avg_comm_lat = (
+                    statistics.mean(LOGS["total"]) / (1000**2)
+                ) - avg_moe_lat
+                logging.info(f"avg expert: {avg_moe_lat} ms")
+                logging.info(f"avg comm: {avg_comm_lat} ms")
 
                 self.send_conn.send(res)
 
