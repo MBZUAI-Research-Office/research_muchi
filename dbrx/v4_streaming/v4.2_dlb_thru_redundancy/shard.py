@@ -604,8 +604,11 @@ class Generator:
                     if len(LOGS[k]) <= 40:
                         # no token generated
                         res.append(0)
-                    else:
-                        res.append(statistics.mean(LOGS[k][40:]) / (1000**2))
+                        continue
+                    avg = statistics.mean(LOGS[k][40:])
+                    if k != "experts_act":
+                        avg /= 1000**2
+                    res.append(avg)
                     LOGS[k] = []
 
                 self.send_conn.send(res)
