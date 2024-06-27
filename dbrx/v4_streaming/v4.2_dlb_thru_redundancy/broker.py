@@ -103,8 +103,8 @@ async def start(
             shards.append(shard)
 
         for _ in range(n_samples):
-            for prompt in prompts:
-                satisfied = await make_inference_requests(shards, prompt, max_tokens)
+            for p in prompts:
+                satisfied = await make_inference_requests(shards, p, max_tokens)
                 n_satisfying_resp += int(satisfied)
 
     print(f"\nnumber of responses reaching max-tokens: {n_satisfying_resp}")

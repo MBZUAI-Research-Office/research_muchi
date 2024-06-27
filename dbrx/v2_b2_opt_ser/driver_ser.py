@@ -401,7 +401,10 @@ class Driver:
             STATS["prompt_eval_tp"].append(prompt_eval_tp)
             STATS["token_gen_tp"].append(token_gen_tp)
             return True
-        
+
+        LOGS["moe_lat"] = []
+        LOGS["comm_lat"] = []
+
         return False
 
     async def start(
