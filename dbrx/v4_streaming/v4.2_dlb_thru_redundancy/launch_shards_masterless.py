@@ -131,7 +131,7 @@ def main():
                 f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{pure_url} 'export PATH="$PATH:/opt/homebrew/bin/" """
                 + f"""&& python3 /Users/xiangruike/run_shard_masterless.py """
                 + f"""--impl-dir {os.getcwd()} --port {port} """
-                + f"""--model-path {args.model_path} --config-filename {args.model_config}"""
+                + f"""--model-path {args.model_path} --config-filename {args.model_config}'"""
             )
             if rc != 0:
                 print(err.strip())
