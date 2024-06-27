@@ -40,7 +40,7 @@ _cleanup_coroutines = []
 
 import statistics
 
-LOGS = {"expert": [], "comm": [], "total": []}
+LOGS = {"expert": [], "comm": [], "total": [], "prev_len": 0}
 
 
 @dataclass
@@ -597,18 +597,18 @@ class Generator:
                 res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
                 pprint.pp(res)
 
-                logging.info(
-                    f"avg expert: {statistics.mean(LOGS['expert'][40:]) / (1000 ** 2)} ms"
-                )
-                logging.info(
-                    f"avg comm: {statistics.mean(LOGS['comm'][40:]) / (1000 ** 2)} ms"
-                )
-                logging.info(
-                    f"total: {statistics.mean(LOGS['total'][40:]) / (1000 ** 2)} ms"
-                )
-                logging.info(f"n samples: {len(LOGS['expert']) - 40}")
                 for k in ["expert", "comm", "total"]:
-                    LOGS[k] = []
+                    LOGS[k] = LOGS[k][LOGS["prev_len"] + 40:]
+                LOGS["prev_len"] = len(LOGS["expert"])
+                logging.info(
+                    f"avg expert: {statistics.mean(LOGS['expert']) / (1000 ** 2)} ms"
+                )
+                logging.info(
+                    f"avg comm: {statistics.mean(LOGS['comm']) / (1000 ** 2)} ms"
+                )
+                logging.info(
+                    f"total: {statistics.mean(LOGS['total']) / (1000 ** 2)} ms"
+                )
 
                 self.send_conn.send(res)
 
