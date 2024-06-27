@@ -17,6 +17,9 @@ message UsrOuts {
   double gen_time = 3;
   int32 gen_t_cnt = 4;
   string response = 5;
+  double avg_moe_lat = 6;
+  double avg_comm_lat = 7;
+  double avg_experts_act = 8;
 }
 
 message ShardOuts {

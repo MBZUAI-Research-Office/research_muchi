@@ -13,18 +13,24 @@ class UsrIns(_message.Message):
     def __init__(self, prompt: _Optional[str] = ..., max_tokens: _Optional[int] = ...) -> None: ...
 
 class UsrOuts(_message.Message):
-    __slots__ = ("prompt_time", "prompt_t_cnt", "gen_time", "gen_t_cnt", "response")
+    __slots__ = ("prompt_time", "prompt_t_cnt", "gen_time", "gen_t_cnt", "response", "avg_moe_lat", "avg_comm_lat", "avg_experts_act")
     PROMPT_TIME_FIELD_NUMBER: _ClassVar[int]
     PROMPT_T_CNT_FIELD_NUMBER: _ClassVar[int]
     GEN_TIME_FIELD_NUMBER: _ClassVar[int]
     GEN_T_CNT_FIELD_NUMBER: _ClassVar[int]
     RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    AVG_MOE_LAT_FIELD_NUMBER: _ClassVar[int]
+    AVG_COMM_LAT_FIELD_NUMBER: _ClassVar[int]
+    AVG_EXPERTS_ACT_FIELD_NUMBER: _ClassVar[int]
     prompt_time: float
     prompt_t_cnt: int
     gen_time: float
     gen_t_cnt: int
     response: str
-    def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., response: _Optional[str] = ...) -> None: ...
+    avg_moe_lat: float
+    avg_comm_lat: float
+    avg_experts_act: float
+    def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., response: _Optional[str] = ..., avg_moe_lat: _Optional[float] = ..., avg_comm_lat: _Optional[float] = ..., avg_experts_act: _Optional[float] = ...) -> None: ...
 
 class ShardOuts(_message.Message):
     __slots__ = ("data", "metadata")

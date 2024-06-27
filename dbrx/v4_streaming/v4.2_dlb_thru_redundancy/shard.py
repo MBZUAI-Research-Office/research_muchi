@@ -10,11 +10,9 @@ import argparse
 import asyncio
 import concurrent.futures
 import inspect
-import io
 import json
 import logging
 import pickle
-import pprint
 import multiprocessing
 import time
 
@@ -40,7 +38,11 @@ _cleanup_coroutines = []
 
 import statistics
 
-LOGS = {"expert": [], "comm": [], "total": [], "prev_len": 0}
+LOGS = {
+    "moe_lat": [],
+    "comm_lat": [],
+    "experts_act": [],
+}
 
 
 @dataclass
@@ -268,6 +270,8 @@ class DistributedMoeBlock(nn.Module):
             for _ in range(n_warmups):
                 jobs[i].add(self.lru_cache.get_lru())
 
+            LOGS["experts_act"].append(len(jobs[i]))
+
         return jobs, job_map
 
     def call_shard_n_all_dispatch(
@@ -294,16 +298,13 @@ class DistributedMoeBlock(nn.Module):
         batch_size: int,
         resv_conn: connection.Connection,
     ):
-        tic = time.perf_counter_ns()
-
         shard_outs = {}
         for _ in range(batch_size * self.n_oth_shards):
             expert_outs = bytes_to_mx(resv_conn.recv_bytes())
             url, li, bi, arr_map = pickle.loads(resv_conn.recv_bytes())
             shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
 
-        return shard_outs, time.perf_counter_ns() - tic
-        # return shard_outs
+        return shard_outs
 
     def __call__(
         self,
@@ -337,13 +338,15 @@ class DistributedMoeBlock(nn.Module):
             self.call_shard_n_all_dispatch, x, jobs, shard, send_conn
         )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
-        fut_map = {compute_fut: "expert", comm_fut: "comm"}
+        fut_map = {compute_fut: "moe", comm_fut: "comm"}
         for fut in concurrent.futures.as_completed(fut_map):
-            so, lat = fut.result()
-            shard_outs.update(so)
-            LOGS[fut_map[fut]].append(lat)
+            if fut_map[fut] == "moe":
+                shard_outs.update(fut.result()[0])
+                LOGS[f"moe_lat"].append(fut.result()[1])
+            else:
+                shard_outs.update(fut.result())
 
-        LOGS["total"].append(time.perf_counter_ns() - tic)
+        LOGS["comm_lat"].append(time.perf_counter_ns() - tic - LOGS["moe_lat"][-1])
 
         y = []
 
@@ -575,13 +578,13 @@ class Generator:
         )
         gen_time = time.perf_counter() - tic
 
-        return (
+        return [
             prompt_time,
             prompt_tokens.size,
             gen_time,
             token_count,
             "".join(token_strings),
-        )
+        ]
 
     def start(self) -> None:
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -595,17 +598,15 @@ class Generator:
                 prompt = self.resv_conn.recv()
                 max_tokens = self.resv_conn.recv()
                 res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
-                pprint.pp(res)
 
-                for k in ["expert", "comm", "total"]:
-                    LOGS[k] = LOGS[k][LOGS["prev_len"] + 40 :]
-                LOGS["prev_len"] = len(LOGS["expert"])
-                avg_moe_lat = statistics.mean(LOGS["expert"]) / (1000**2)
-                avg_comm_lat = (
-                    statistics.mean(LOGS["total"]) / (1000**2)
-                ) - avg_moe_lat
-                logging.info(f"avg expert: {avg_moe_lat} ms")
-                logging.info(f"avg comm: {avg_comm_lat} ms")
+                # pprint.pp(res)
+                for k in ["moe_lat", "comm_lat", "experts_act"]:
+                    if len(LOGS[k] <= 40):
+                        # no token generated
+                        res.append(0)
+                    else:
+                        res.append(statistics.mean(LOGS[k][40:]) / (1000**2))
+                    LOGS[k] = []
 
                 self.send_conn.send(res)
 
@@ -754,6 +755,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             gen_time=job["resp"][2],
             gen_t_cnt=job["resp"][3],
             response=job["resp"][4],
+            avg_moe_lat=job["resp"][5],
+            avg_comm_lat=job["resp"][6],
+            avg_experts_act=job["resp"][7],
         )
 
     async def start(self) -> None:

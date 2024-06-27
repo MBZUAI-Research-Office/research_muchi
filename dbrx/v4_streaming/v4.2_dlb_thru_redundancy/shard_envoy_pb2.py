@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11shard_envoy.proto\",\n\x06UsrIns\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\x12\n\nmax_tokens\x18\x02 \x01(\x05\"k\n\x07UsrOuts\x12\x13\n\x0bprompt_time\x18\x01 \x01(\x01\x12\x14\n\x0cprompt_t_cnt\x18\x02 \x01(\x05\x12\x10\n\x08gen_time\x18\x03 \x01(\x01\x12\x11\n\tgen_t_cnt\x18\x04 \x01(\x05\x12\x10\n\x08response\x18\x05 \x01(\t\"+\n\tShardOuts\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x10\n\x08metadata\x18\x02 \x01(\x0c\"\x07\n\x05\x45mpty\"\x18\n\nIdentifier\x12\n\n\x02li\x18\x01 \x01(\x05\x32t\n\nShardEnvoy\x12$\n\x0bSignalReady\x12\x0b.Identifier\x1a\x06.Empty\"\x00\x12\x1f\n\x08Generate\x12\x07.UsrIns\x1a\x08.UsrOuts\"\x00\x12\x1f\n\x07Receive\x12\n.ShardOuts\x1a\x06.Empty\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11shard_envoy.proto\",\n\x06UsrIns\x12\x0e\n\x06prompt\x18\x01 \x01(\t\x12\x12\n\nmax_tokens\x18\x02 \x01(\x05\"\xaf\x01\n\x07UsrOuts\x12\x13\n\x0bprompt_time\x18\x01 \x01(\x01\x12\x14\n\x0cprompt_t_cnt\x18\x02 \x01(\x05\x12\x10\n\x08gen_time\x18\x03 \x01(\x01\x12\x11\n\tgen_t_cnt\x18\x04 \x01(\x05\x12\x10\n\x08response\x18\x05 \x01(\t\x12\x13\n\x0b\x61vg_moe_lat\x18\x06 \x01(\x01\x12\x14\n\x0c\x61vg_comm_lat\x18\x07 \x01(\x01\x12\x17\n\x0f\x61vg_experts_act\x18\x08 \x01(\x01\"+\n\tShardOuts\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x10\n\x08metadata\x18\x02 \x01(\x0c\"\x07\n\x05\x45mpty\"\x18\n\nIdentifier\x12\n\n\x02li\x18\x01 \x01(\x05\x32t\n\nShardEnvoy\x12$\n\x0bSignalReady\x12\x0b.Identifier\x1a\x06.Empty\"\x00\x12\x1f\n\x08Generate\x12\x07.UsrIns\x1a\x08.UsrOuts\"\x00\x12\x1f\n\x07Receive\x12\n.ShardOuts\x1a\x06.Empty\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -23,14 +23,14 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _globals['_USRINS']._serialized_start=21
   _globals['_USRINS']._serialized_end=65
-  _globals['_USROUTS']._serialized_start=67
-  _globals['_USROUTS']._serialized_end=174
-  _globals['_SHARDOUTS']._serialized_start=176
-  _globals['_SHARDOUTS']._serialized_end=219
-  _globals['_EMPTY']._serialized_start=221
-  _globals['_EMPTY']._serialized_end=228
-  _globals['_IDENTIFIER']._serialized_start=230
-  _globals['_IDENTIFIER']._serialized_end=254
-  _globals['_SHARDENVOY']._serialized_start=256
-  _globals['_SHARDENVOY']._serialized_end=372
+  _globals['_USROUTS']._serialized_start=68
+  _globals['_USROUTS']._serialized_end=243
+  _globals['_SHARDOUTS']._serialized_start=245
+  _globals['_SHARDOUTS']._serialized_end=288
+  _globals['_EMPTY']._serialized_start=290
+  _globals['_EMPTY']._serialized_end=297
+  _globals['_IDENTIFIER']._serialized_start=299
+  _globals['_IDENTIFIER']._serialized_end=323
+  _globals['_SHARDENVOY']._serialized_start=325
+  _globals['_SHARDENVOY']._serialized_end=441
 # @@protoc_insertion_point(module_scope)
