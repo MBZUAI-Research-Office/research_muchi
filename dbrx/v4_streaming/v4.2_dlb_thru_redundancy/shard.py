@@ -38,12 +38,10 @@ DEFAULT_STARTUP_WARMING_PERIOD = 10  # unit: tokens
 # https://github.com/grpc/grpc/blob/master/examples/python/helloworld/async_greeter_server_with_graceful_shutdown.py
 _cleanup_coroutines = []
 
-# import statistics
-# LOGS = {
-#     "expert": [],
-#     "comm": [],
-#     "total": []
-# }
+import statistics
+
+LOGS = {"expert": [], "comm": [], "total": []}
+
 
 @dataclass
 class ModelArgs:
@@ -288,8 +286,8 @@ class DistributedMoeBlock(nn.Module):
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
 
-        # return shard_outs, time.perf_counter_ns() - tic
-        return shard_outs
+        return shard_outs, time.perf_counter_ns() - tic
+        # return shard_outs
 
     def all_combine(
         self,
@@ -304,8 +302,8 @@ class DistributedMoeBlock(nn.Module):
             url, li, bi, arr_map = pickle.loads(resv_conn.recv_bytes())
             shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
 
-        # return shard_outs, time.perf_counter_ns() - tic
-        return shard_outs
+        return shard_outs, time.perf_counter_ns() - tic
+        # return shard_outs
 
     def __call__(
         self,
@@ -339,14 +337,13 @@ class DistributedMoeBlock(nn.Module):
             self.call_shard_n_all_dispatch, x, jobs, shard, send_conn
         )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
-        # fut_map = {compute_fut: "expert", comm_fut: "comm"}
-        for fut in concurrent.futures.as_completed([compute_fut, comm_fut]):
-            # so, lat = fut.result()
-            # shard_outs.update(so)
-            # LOGS[fut_map[fut]].append(lat)
-            shard_outs.update(fut.result())
+        fut_map = {compute_fut: "expert", comm_fut: "comm"}
+        for fut in concurrent.futures.as_completed(fut_map):
+            so, lat = fut.result()
+            shard_outs.update(so)
+            LOGS[fut_map[fut]].append(lat)
 
-        # LOGS["total"].append(time.perf_counter_ns() - tic)
+        LOGS["total"].append(time.perf_counter_ns() - tic)
 
         y = []
 
@@ -599,10 +596,20 @@ class Generator:
                 max_tokens = self.resv_conn.recv()
                 res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
                 pprint.pp(res)
-                # logging.info(f"avg expert: {statistics.mean(LOGS['expert'][40:]) / (1000 ** 2)} ms")
-                # logging.info(f"avg comm: {statistics.mean(LOGS['comm'][40:]) / (1000 ** 2)} ms")
-                # logging.info(f"total: {statistics.mean(LOGS['total'][40:]) / (1000 ** 2)} ms")
-                # logging.info(f"n samples: {len(LOGS['expert']) - 40}")
+
+                logging.info(
+                    f"avg expert: {statistics.mean(LOGS['expert'][40:]) / (1000 ** 2)} ms"
+                )
+                logging.info(
+                    f"avg comm: {statistics.mean(LOGS['comm'][40:]) / (1000 ** 2)} ms"
+                )
+                logging.info(
+                    f"total: {statistics.mean(LOGS['total'][40:]) / (1000 ** 2)} ms"
+                )
+                logging.info(f"n samples: {len(LOGS['expert']) - 40}")
+                for k in ["expert", "comm", "total"]:
+                    LOGS[k] = []
+
                 self.send_conn.send(res)
 
 

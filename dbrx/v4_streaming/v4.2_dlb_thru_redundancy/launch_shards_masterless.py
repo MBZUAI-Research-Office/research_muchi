@@ -4,12 +4,13 @@
 #
 #  terminate all shards:
 #    python launch_shards_masterless.py --model-path ~/dbrx-instruct/distributable/batch2/ --terminate
-import subprocess
-import time
+from pathlib import Path
 from types import SimpleNamespace
 import argparse
-from pathlib import Path
 import json
+import os
+import subprocess
+import time
 
 """terminal color"""
 TC = SimpleNamespace(
@@ -99,13 +100,13 @@ class Cmd:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model-path", required=True, type=str, help="Path to local model directory"
-    )
+    parser.add_argument("--model-path", required=True, type=str)
+    parser.add_argument("--launcher-config", required=True, type=str)
+    parser.add_argument("--model-config", required=True, type=str)
     parser.add_argument("--terminate", action="store_true")
     args = parser.parse_args()
     try:
-        with open(Path(args.model_path) / "v4.2_broker_config.json", "r") as f:
+        with open(Path(args.model_path) / args.launcher_config, "r") as f:
             config = json.load(f)
     except FileNotFoundError:
         raise
@@ -119,7 +120,7 @@ def main():
         if args.terminate:
             rc, out, err = Cmd(
                 f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{pure_url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --port {port} --terminate'"""
+                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --terminate'"""
             )
             if rc != 0:
                 print(err.strip())
@@ -128,7 +129,9 @@ def main():
         else:
             rc, out, err = Cmd(
                 f"""ssh -i ~/.ssh/id_llamacpp xiangruike@{pure_url} 'export PATH="$PATH:/opt/homebrew/bin/" """
-                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py --port {port}'"""
+                + f"""&& python3 /Users/xiangruike/run_shard_masterless.py """
+                + f"""--impl-dir {os.getcwd()} --port {port} """
+                + f"""--model-path {args.model_path} --config-filename {args.model_config}"""
             )
             if rc != 0:
                 print(err.strip())
