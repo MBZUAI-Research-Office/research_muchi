@@ -64,7 +64,7 @@ async def make_inference_requests(
     print(f"throughput: {token_gen_tp:.3f} t/s")
 
     if output.gen_t_cnt == max_tokens:
-        avg_misc_lat = (output.gen_time / (output.gen_t_cnt - 1) / 40) - output.avg_moe_lat - output.avg_comm_lat
+        avg_misc_lat = (1000 / token_gen_tp / 40) - output.avg_moe_lat - output.avg_comm_lat
         STATS["moe_lat"].append(output.avg_moe_lat)
         STATS["comm_lat"].append(output.avg_comm_lat)
         STATS["misc_lat"].append(avg_misc_lat)
