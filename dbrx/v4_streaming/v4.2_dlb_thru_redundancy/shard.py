@@ -601,7 +601,7 @@ class Generator:
 
                 # pprint.pp(res)
                 for k in ["moe_lat", "comm_lat", "experts_act"]:
-                    if len(LOGS[k] <= 40):
+                    if len(LOGS[k]) <= 40:
                         # no token generated
                         res.append(0)
                     else:
