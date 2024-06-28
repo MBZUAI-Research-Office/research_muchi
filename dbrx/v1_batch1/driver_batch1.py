@@ -23,13 +23,21 @@ import mlx.nn as nn
 
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
-DEFAULT_PROMPT = "hello"
+# DEFAULT_PROMPT = "hello"
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 
 import statistics
+import pprint
 
-LOGS = {"expert": [], "comm": []}
+STATS = {
+    "moe_lat": [],
+    "comm_lat": [],
+    "misc_lat": [],
+    "prompt_eval_tp": [],
+    "token_gen_tp": [],
+}
+LOGS = {"moe_lat": [], "comm_lat": []}
 
 
 @dataclass
@@ -207,9 +215,9 @@ class DistributedSparseMoeBlock(nn.Module):
                 ]
 
             toc = time.perf_counter_ns()
-            expert_latency = statistics.mean(task.result()[1] for task in shard_tasks)
-            LOGS["expert"].append(expert_latency)
-            LOGS["comm"].append((toc - tic) - expert_latency)
+            moe_latency = statistics.mean(task.result()[1] for task in shard_tasks)
+            LOGS["moe_lat"].append(moe_latency)
+            LOGS["comm_lat"].append((toc - tic) - moe_latency)
 
             yt = mx.stack(
                 mx.concatenate([task.result()[0] for task in shard_tasks], axis=0),
@@ -271,18 +279,28 @@ class DistributedDBRX(nn.Module):
         return self.lm_head(self.norm_f(h)), cache
 
 
+def get_json(file_path: Path) -> dict:
+    try:
+        with open(file_path, "r") as f:
+            res = json.load(f)
+    except FileNotFoundError:
+        logging.error(f"{file_path} not found")
+        raise
+
+    return res
+
+
+def reset_logs():
+    LOGS["moe_lat"] = []
+    LOGS["comm_lat"] = []
+
+
 class Driver:
     def __init__(self, model_path: str) -> None:
         self.model_path = Path(model_path)
 
     def get_model_args(self) -> ModelArgs:
-        try:
-            with open(self.model_path / "v0_driver_config.json", "r") as f:
-                config = json.load(f)
-        except FileNotFoundError:
-            logging.error(f"v0_driver_config.json not found in {self.model_path}")
-            raise
-
+        config = get_json(self.model_path / "v0_driver_config.json")
         model_args = ModelArgs.from_dict(config)
 
         model_args.ffn_config["expert_to_shard"] = {}
@@ -378,23 +396,46 @@ class Driver:
 
         print(token_strings[-1][skip:], flush=True)
         gen_time = time.perf_counter() - tic
+        prompt_eval_tp = prompt_tokens.size / prompt_time
+        token_gen_tp = (n - 1) / gen_time
         print("=" * 10)
         if n == 0:
             print("No tokens generated for this prompt")
             return
         print(
             f"Prompt: {prompt_tokens.size} tokens in {prompt_time} seconds "
-            + f"= {(prompt_tokens.size / prompt_time):.3f} t/s"
+            + f"= {prompt_eval_tp:.3f} t/s"
         )
         print(
             f"Generation: {n - 1} tokens in {gen_time} seconds "
-            + f"= {((n - 1) / gen_time):.3f} t/s"
+            + f"= {token_gen_tp:.3f} t/s"
         )
-        logs_skip = -40 * (n - 1)
-        print(f"avg expert {statistics.mean(LOGS['expert'][logs_skip:]) / (1000 ** 2)} ms")
-        print(f"avg comm {statistics.mean(LOGS['comm'][logs_skip:]) / (1000 ** 2)} ms")
 
-    async def start(self, prompt: str, max_tokens: int, temp: float) -> None:
+        if n >= max_tokens * 0.85:
+            logs_skip = -40 * (n - 1)
+            print(f"logs len: {len(LOGS["moe_lat"])}, start: {logs_skip}")
+            avg_moe_lat = statistics.mean(LOGS["moe_lat"][logs_skip:]) / (1000**2)
+            avg_comm_lat = statistics.mean(LOGS["comm_lat"][logs_skip:]) / (1000**2)
+            avg_misc_lat = (1000 / token_gen_tp / 40) - avg_moe_lat - avg_comm_lat
+            STATS["moe_lat"].append(avg_moe_lat)
+            STATS["comm_lat"].append(avg_comm_lat)
+            STATS["misc_lat"].append(avg_misc_lat)
+            STATS["prompt_eval_tp"].append(prompt_eval_tp)
+            STATS["token_gen_tp"].append(token_gen_tp)
+            reset_logs()
+            return True
+
+        reset_logs()
+        return False
+
+    async def start(
+        self,
+        prompt: str,
+        prompt_path: str,
+        n_samples: int,
+        max_tokens: int,
+        temp: float,
+    ) -> None:
         async with AsyncExitStack() as es:
             model_args = self.get_model_args()
             shard_channels = [
@@ -415,8 +456,23 @@ class Driver:
             tokenizer = AutoTokenizer.from_pretrained(
                 self.model_path, trust_remote_code=True
             )
+            prompts = get_json(Path(prompt_path))["prompts"] if not prompt else [prompt]
+            n_satisfying_resp = 0
 
-            await self.generate(model, tokenizer, prompt, max_tokens, temp)
+            for _ in range(n_samples):
+                for p in prompts:
+                    satisfied = await self.generate(
+                        model, tokenizer, p, max_tokens, temp
+                    )
+                    n_satisfying_resp += int(satisfied)
+
+            print(f"\nnumber of responses reaching max-tokens: {n_satisfying_resp}")
+            print(f"AVG MoE latency: {statistics.mean(STATS['moe_lat'])} ms")
+            print(f"AVG Comm latency: {statistics.mean(STATS['comm_lat'])} ms")
+            print(f"AVG Misc latency: {statistics.mean(STATS['misc_lat'])} ms")
+            print(f"AVG Prompt Eval TP: {statistics.mean(STATS['prompt_eval_tp'])} t/s")
+            print(f"AVG Token Gen TP: {statistics.mean(STATS['token_gen_tp'])} t/s")
+            pprint.pp(STATS)
 
 
 if __name__ == "__main__":
@@ -425,9 +481,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompt",
         type=str,
-        default=DEFAULT_PROMPT,
+        default="",
         help="Message to be processed by the model",
     )
+    parser.add_argument("--prompt-path", type=str)
+    parser.add_argument("--n-samples", type=int)
     parser.add_argument(
         "--max-tokens",
         type=int,
@@ -444,4 +502,8 @@ if __name__ == "__main__":
 
     logging.basicConfig()
     driver = Driver(args.model_path)
-    asyncio.run(driver.start(args.prompt, args.max_tokens, args.temp))
+    asyncio.run(
+        driver.start(
+            args.prompt, args.prompt_path, args.n_samples, args.max_tokens, args.temp
+        )
+    )
