@@ -413,7 +413,6 @@ class Driver:
 
         if n >= max_tokens * 0.85:
             logs_skip = -40 * (n - 1)
-            print(f"logs len: {len(LOGS["moe_lat"])}, start: {logs_skip}")
             avg_moe_lat = statistics.mean(LOGS["moe_lat"][logs_skip:]) / (1000**2)
             avg_comm_lat = statistics.mean(LOGS["comm_lat"][logs_skip:]) / (1000**2)
             avg_misc_lat = (1000 / token_gen_tp / 40) - avg_moe_lat - avg_comm_lat
