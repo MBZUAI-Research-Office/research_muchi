@@ -23,7 +23,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from serialization_utils import mx_to_bytes, bytes_to_mx
 
-DEFAULT_PROMPT = "hello"
+# DEFAULT_PROMPT = "hello"
 DEFAULT_MAX_TOKENS = 100
 DEFAULT_TEMP = 0.6
 
@@ -193,11 +193,9 @@ class DistributedSparseMoeBlock(nn.Module):
                 exec_tasks[url] = task
 
         toc = time.perf_counter_ns()
-        expert_latency = statistics.mean(
-            task.result()[1] for task in exec_tasks.values()
-        )
-        LOGS["moe_lat"].append(expert_latency)
-        LOGS["comm_lat"].append((toc - tic) - expert_latency)
+        moe_latency = statistics.mean(task.result()[1] for task in exec_tasks.values())
+        LOGS["moe_lat"].append(moe_latency)
+        LOGS["comm_lat"].append((toc - tic) - moe_latency)
 
         for bi, st, it in zip(range(batch_size), scores, inds.tolist()):
             yt = []
@@ -272,6 +270,11 @@ def get_json(file_path: Path) -> dict:
         raise
 
     return res
+
+
+def reset_logs():
+    LOGS["moe_lat"] = []
+    LOGS["comm_lat"] = []
 
 
 class Driver:
@@ -400,11 +403,10 @@ class Driver:
             STATS["misc_lat"].append(avg_misc_lat)
             STATS["prompt_eval_tp"].append(prompt_eval_tp)
             STATS["token_gen_tp"].append(token_gen_tp)
+            reset_logs()
             return True
 
-        LOGS["moe_lat"] = []
-        LOGS["comm_lat"] = []
-
+        reset_logs()
         return False
 
     async def start(
@@ -436,7 +438,9 @@ class Driver:
 
             for _ in range(n_samples):
                 for p in prompts:
-                    satisfied = await self.generate(model, tokenizer, p, max_tokens, temp)
+                    satisfied = await self.generate(
+                        model, tokenizer, p, max_tokens, temp
+                    )
                     n_satisfying_resp += int(satisfied)
 
             print(f"\nnumber of responses reaching max-tokens: {n_satisfying_resp}")
@@ -454,7 +458,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompt",
         type=str,
-        default=DEFAULT_PROMPT,
+        default="",
         help="Message to be processed by the model",
     )
     parser.add_argument("--prompt-path", type=str)
