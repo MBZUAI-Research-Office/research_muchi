@@ -8,6 +8,7 @@ import json
 import logging
 import pprint
 import statistics
+import time
 
 import grpc
 import shard_envoy_pb2
@@ -106,6 +107,7 @@ async def start(
             for p in prompts:
                 satisfied = await make_inference_requests(shards, p, max_tokens)
                 n_satisfying_resp += int(satisfied)
+                time.sleep(1)
 
     print(f"\nnumber of responses reaching max-tokens: {n_satisfying_resp}")
     print(f"AVG MoE latency: {statistics.mean(STATS['moe_lat'])} ms")
