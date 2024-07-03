@@ -285,6 +285,7 @@ if __name__ == "__main__":
         args.input_path,
         args.output_path,
         args.batching_strategy,
+        args.skip_experts,
         args.skip_sep,
         args.clean_sep,
     )
