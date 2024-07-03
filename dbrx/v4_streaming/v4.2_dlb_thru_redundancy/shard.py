@@ -345,7 +345,7 @@ class DecoderLayer(nn.Module):
     def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
         self.ffn = DistributedMoeBlock(args, layer_num)
-        self.norm_attn_norm = NormAttnNorm(args)
+        self.norm_attn_norm = NormAttnNorm(args, layer_num)
 
     def __call__(
         self,
