@@ -530,7 +530,7 @@ class Generator:
         # mx.eval(model.parameters())
         model.eval()
 
-        return model, Warmer(self.model_args, moe_shard, self.resv_conn, self.send_conn)
+        return model, Warmer(self.model_args, raw_weights, self.resv_conn, self.send_conn)
 
     def generate(
         self,
