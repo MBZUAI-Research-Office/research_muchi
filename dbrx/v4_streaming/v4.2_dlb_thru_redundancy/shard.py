@@ -133,11 +133,11 @@ class Attention(nn.Module):
 
 
 class NormAttnNorm(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
         self.norm_1 = nn.LayerNorm(args.d_model, bias=False)
         self.norm_2 = nn.LayerNorm(args.d_model, bias=False)
-        self.attn = Attention(args)
+        self.attn = Attention(args, layer_num)
 
     def __call__(
         self,
@@ -311,7 +311,7 @@ class DistributedMoeBlock(nn.Module):
         tic = time.perf_counter_ns()
 
         compute_fut = executor.submit(
-            self.call_shard_n_all_dispatch, x, jobs, raw_weights, send_conn
+            self.call_shard_n_all_dispatch, x, batch_size, jobs, raw_weights, send_conn
         )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
         fut_map = {compute_fut: "moe", comm_fut: "comm"}
@@ -530,7 +530,9 @@ class Generator:
         # mx.eval(model.parameters())
         model.eval()
 
-        return model, Warmer(self.model_args, raw_weights, self.resv_conn, self.send_conn)
+        return model, Warmer(
+            self.model_args, raw_weights, self.resv_conn, self.send_conn
+        )
 
     def generate(
         self,
