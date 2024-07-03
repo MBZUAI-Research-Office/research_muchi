@@ -215,9 +215,8 @@ class DistributedMoeBlock(nn.Module):
         return jobs, job_map
 
     def moe_shard(
-        self, x: mx.array, job: set, raw_weights: dict, warms: bool
+        self, x: mx.array, job: set, ws: dict, extras: list
     ) -> tuple[mx.array, dict]:
-        ws = raw_weights[self.layer_num]
         expert_outs = []
         arr_map = {}
 
@@ -230,18 +229,8 @@ class DistributedMoeBlock(nn.Module):
 
         expert_outs = mx.stack(expert_outs, axis=0)
 
-        if warms:
-            extras = []
-            for vec in ws["wqkv"]:
-                extras.append(vec + 1)
-                break
-            for vec in ws["out_proj"]:
-                extras.append(vec + 1)
-                break
-            for vec in raw_weights["lm_head"]:
-                extras.append(vec + 1)
-                break
-            mx.eval(extras, expert_outs)
+        if len(extras) > 0:
+            mx.eval(mx.sum(mx.stack(extras, axis=0), axis=0), expert_outs)
         else:
             mx.eval(expert_outs)
 
@@ -250,15 +239,30 @@ class DistributedMoeBlock(nn.Module):
     def call_shard_n_all_dispatch(
         self,
         x: mx.array,
+        batch_size: int,
         jobs: list[set],
         raw_weights: dict,
         send_conn: connection.Connection,
     ) -> dict:
         tic = time.perf_counter_ns()
 
+        ws = raw_weights[self.layer_num]
+        extras = []
+
+        if batch_size > 1:
+            for vec in ws["wqkv"]:
+                extras.append(vec)
+                break
+            for vec in ws["out_proj"]:
+                extras.append(vec)
+                break
+            for vec in raw_weights["lm_head"]:
+                extras.append(vec)
+                break
+
         shard_outs = {}
         for bi, xt in enumerate(x):
-            expert_outs, arr_map = self.moe_shard(xt, jobs[bi], raw_weights)
+            expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws, extras)
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
