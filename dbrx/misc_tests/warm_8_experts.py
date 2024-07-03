@@ -11,32 +11,21 @@ class MoeShard:
     def __init__(self, experts: dict) -> None:
         self.experts = experts
 
-    def reset_expert_generators(self, for_warming: bool = False):
-
-        def get_expert_generator(e):
-            v1, w1 = None, None
-            for i, weight in enumerate(self.experts[e]["weights"]):
-                if i % 3 == 0:
-                    v1 = weight.T
-                elif i % 3 == 1:
-                    w1 = weight.T
-                else:
-                    w2 = weight.T if for_warming else weight
-                    yield v1, w1, w2
-
+    def get_ptrs(self) -> None:
         for e in self.experts:
-            self.experts[e]["generator"] = get_expert_generator(e)
+            for mat in self.experts[e]["weights"]:
+                for vec in mat:
+                    self.experts[e]["ptr"] = vec
+                    break
+                break
 
     def warm(self) -> None:
-        xs = []
-        for e in self.experts:
-            xs.extend(next(self.experts[e]["generator"]))
-
+        xs = [e["ptr"] for e in self.experts.values()]
         mx.eval(mx.sum(mx.stack(xs, axis=0), axis=0))
 
 
 def main():
-    weights_dir = "/Users/xiangruike/dbrx-base/distributable/batch2"
+    weights_dir = "/Users/xiangruike/dbrx-instruct/distributable/batch2"
     experts = {
         e: mx.load(f"{weights_dir}/expert{e}.safetensors")
         for e in [0, 1, 2, 3, 4, 5, 6, 7]
@@ -44,22 +33,20 @@ def main():
     mx.eval(experts)
     shard = MoeShard(experts)
 
-    n = 1200
-    latencies = []
+    n = 100000
+    warmup = 10
+    shard.get_ptrs()
 
-    for i in range(n):
-        if i % 40 == 0:
-            shard.reset_expert_generators(for_warming=True)
-
-        tic = time.perf_counter_ns()
-
+    for _ in range(warmup):
         shard.warm()
 
-        latency = time.perf_counter_ns() - tic
-        latencies.append(latency)
-        print(f"finished iter {i} in {round(latency / 1000, 3)} mu_s", flush=True)
+    tic = time.perf_counter_ns()
 
-    print(f"AVG latency: {round(mean(latencies[10:]) / 1000, 3)} mu_s")
+    for _ in range(n):
+        shard.warm()
+
+    toc = time.perf_counter_ns()
+    print(f"AVG latency: {round((toc - tic) / n / 1000**2, 3)} ms")
 
 
 if __name__ == "__main__":
