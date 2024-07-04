@@ -120,6 +120,9 @@ class RawWeights:
     def __call__(self, k):
         return self.ptrs[k]
 
+    def get_extras(self, for_standby: bool = False) -> list[mx.array]:
+        return self.standby_extras if for_standby else self.light_extras
+
 
 class LruCache(OrderedDict):
     # inspired by:
@@ -271,7 +274,7 @@ class DistributedMoeBlock(nn.Module):
         return jobs, job_map
 
     def moe_shard(
-        self, x: mx.array, job: set, ws: dict, extras: list
+        self, x: mx.array, job: set, ws: dict, extras: list[mx.array]
     ) -> tuple[mx.array, dict]:
         expert_outs = []
         arr_map = {}
@@ -304,7 +307,7 @@ class DistributedMoeBlock(nn.Module):
         tic = time.perf_counter_ns()
 
         ws = raw_weights(self.layer_num)
-        extras = raw_weights.light_extras if batch_size > 1 else []
+        extras = raw_weights.get_extras() if batch_size > 1 else []
         shard_outs = {}
         for bi, xt in enumerate(x):
             expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws, extras)
@@ -471,8 +474,11 @@ class Warmer:
         self.send_conn = send_conn
 
     def warm(self) -> None:
-        y = mx.sum(mx.stack(self.raw_weights.standby_extras, axis=0), axis=0)
-        mx.eval(y)
+        mx.eval(
+            mx.sum(
+                mx.stack(self.raw_weights.get_extras(for_standby=True), axis=0), axis=0
+            )
+        )
 
     def sync_w_oths(self):
         self.send_conn.send(True)  # signals that I am ready
