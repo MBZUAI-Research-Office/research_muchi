@@ -66,6 +66,61 @@ class ModelArgs:
         )
 
 
+class RawWeights:
+
+    def __init__(
+        self,
+        n_layers: int,
+        wqkv: mx.array,
+        out_proj: mx.array,
+        experts: dict,
+        lm_head: mx.array,
+    ) -> None:
+        ptrs = {i: {} for i in range(n_layers)}
+        for i, mat in enumerate(wqkv):
+            ptrs[i]["wqkv"] = mat
+        for i, mat in enumerate(out_proj):
+            ptrs[i]["out_proj"] = mat
+        for e, d in experts.items():
+            for j, mat in enumerate(d["weights"]):
+                i = j // 3
+                if e not in ptrs[i]:
+                    ptrs[i][e] = {}
+                if j % 3 == 0:
+                    ptrs[i][e]["v1"] = mat
+                elif j % 3 == 1:
+                    ptrs[i][e]["w1"] = mat
+                else:
+                    ptrs[i][e]["w2"] = mat
+        ptrs["lm_head"] = lm_head
+
+        standby_extras = []
+        light_extras = []
+        for vec in ptrs[0][f"wqkv"]:
+            standby_extras.append(vec)
+            light_extras.append(vec)
+            break
+        for vec in ptrs[0][f"out_proj"]:
+            standby_extras.append(vec)
+            light_extras.append(vec)
+            break
+        for e in experts:
+            for vec in ptrs[0][e]["v1"]:
+                standby_extras.append(vec)
+                break
+        for vec in ptrs["lm_head"]:
+            standby_extras.append(vec)
+            light_extras.append(vec)
+            break
+
+        self.ptrs = ptrs
+        self.standby_extras = standby_extras
+        self.light_extras = light_extras
+
+    def __call__(self, k):
+        return self.ptrs[k]
+
+
 class LruCache(OrderedDict):
     # inspired by:
     # https://docs.python.org/3/library/collections.html#collections.OrderedDict
@@ -97,11 +152,12 @@ class Attention(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        raw_weights: dict,
+        raw_weights: RawWeights,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-        qkv = x @ raw_weights[self.layer_num]["wqkv"].T
+        ws = raw_weights(self.layer_num)
+        qkv = x @ ws["wqkv"].T
         qkv = mx.clip(qkv, a_min=-self.clip_qkv, a_max=self.clip_qkv)
         splits = [self.d_model, self.d_model + self.head_dim * self.num_key_value_heads]
         queries, keys, values = mx.split(qkv, splits, axis=-1)
@@ -129,7 +185,7 @@ class Attention(nn.Module):
             queries, keys, values, scale=self.scale, mask=mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return output @ raw_weights[self.layer_num]["out_proj"].T, (keys, values)
+        return output @ ws["out_proj"].T, (keys, values)
 
 
 class NormAttnNorm(nn.Module):
@@ -142,7 +198,7 @@ class NormAttnNorm(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        raw_weights: dict,
+        raw_weights: RawWeights,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
@@ -223,8 +279,9 @@ class DistributedMoeBlock(nn.Module):
         for e in self.experts:
             if e not in job:
                 continue
-            v1, w1, w2 = ws[f"{e}.v1"].T, ws[f"{e}.w1"].T, ws[f"{e}.w2"]
-            expert_outs.append((self.act_fn(x @ w1) * (x @ v1)) @ w2)
+            expert_outs.append(
+                (self.act_fn(x @ ws["w1"].T) * (x @ ws["v1"].T)) @ ws["w2"]
+            )
             arr_map[e] = len(expert_outs) - 1
 
         expert_outs = mx.stack(expert_outs, axis=0)
@@ -241,25 +298,13 @@ class DistributedMoeBlock(nn.Module):
         x: mx.array,
         batch_size: int,
         jobs: list[set],
-        raw_weights: dict,
+        raw_weights: RawWeights,
         send_conn: connection.Connection,
     ) -> dict:
         tic = time.perf_counter_ns()
 
-        ws = raw_weights[self.layer_num]
-        extras = []
-
-        if batch_size > 1:
-            for vec in ws["wqkv"]:
-                extras.append(vec)
-                break
-            for vec in ws["out_proj"]:
-                extras.append(vec)
-                break
-            for vec in raw_weights["lm_head"]:
-                extras.append(vec)
-                break
-
+        ws = raw_weights(self.layer_num)
+        extras = raw_weights.light_extras if batch_size > 1 else []
         shard_outs = {}
         for bi, xt in enumerate(x):
             expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws, extras)
@@ -285,7 +330,7 @@ class DistributedMoeBlock(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        raw_weights: dict,
+        raw_weights: RawWeights,
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
         executor: concurrent.futures.ThreadPoolExecutor,
@@ -350,7 +395,7 @@ class DecoderLayer(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        raw_weights: dict,
+        raw_weights: RawWeights,
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
         executor: concurrent.futures.ThreadPoolExecutor,
@@ -366,7 +411,7 @@ class DBRX(nn.Module):
     def __init__(
         self,
         args: ModelArgs,
-        raw_weights: dict,
+        raw_weights: RawWeights,
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
     ):
@@ -409,44 +454,25 @@ class DBRX(nn.Module):
                 cache[e],
             )
 
-        return self.norm_f(h) @ self.raw_weights["lm_head"].T, cache
+        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
 
 
 class Warmer:
     def __init__(
         self,
         args: ModelArgs,
-        raw_weights: dict,
+        raw_weights: RawWeights,
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
     ):
         self.n_layers = args.n_layers
-        self.experts = args.ffn_config["assigned_experts"]
         self.raw_weights = raw_weights
         self.resv_conn = resv_conn
         self.send_conn = send_conn
 
     def warm(self) -> None:
-        xs = []
-
-        for vec in self.raw_weights["lm_head"]:
-            xs.append(vec)
-            break
-
-        for vec in self.raw_weights[0][f"wqkv"]:
-            xs.append(vec)
-            break
-
-        for vec in self.raw_weights[0][f"out_proj"]:
-            xs.append(vec)
-            break
-
-        for e in self.experts:
-            for vec in self.raw_weights[0][f"{e}.v1"]:
-                xs.append(vec)
-                break
-
-        mx.eval(mx.sum(mx.stack(xs, axis=0), axis=0))
+        y = mx.sum(mx.stack(self.raw_weights.standby_extras, axis=0), axis=0)
+        mx.eval(y)
 
     def sync_w_oths(self):
         self.send_conn.send(True)  # signals that I am ready
@@ -509,22 +535,13 @@ class Generator:
         }
         mx.eval(wqkv, out_proj, oth_non_es, experts)
 
-        raw_weights = {i: {} for i in range(self.model_args.n_layers)}
-        for i, mat in enumerate(wqkv):
-            raw_weights[i]["wqkv"] = mat
-        for i, mat in enumerate(out_proj):
-            raw_weights[i]["out_proj"] = mat
-        for e, d in experts.items():
-            for j, mat in enumerate(d["weights"]):
-                i = j // 3
-                if j % 3 == 0:
-                    raw_weights[i][f"{e}.v1"] = mat
-                elif j % 3 == 1:
-                    raw_weights[i][f"{e}.w1"] = mat
-                else:
-                    raw_weights[i][f"{e}.w2"] = mat
-        raw_weights["lm_head"] = oth_non_es.pop("lm_head.weight")
-
+        raw_weights = RawWeights(
+            self.model_args.n_layers,
+            wqkv,
+            out_proj,
+            experts,
+            oth_non_es.pop("lm_head.weight"),
+        )
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
         model.load_weights(list(oth_non_es.items()))
         # mx.eval(model.parameters())
