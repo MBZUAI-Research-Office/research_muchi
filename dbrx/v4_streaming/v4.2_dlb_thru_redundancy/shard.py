@@ -9,7 +9,6 @@ from typing import Any, Optional, Tuple
 import concurrent.futures
 import argparse
 import asyncio
-import gc
 import inspect
 import json
 import logging
@@ -93,35 +92,10 @@ class RawWeights:
                 else:
                     ptrs[i][e]["w2"] = mat
         ptrs["lm_head"] = lm_head
-
-        standby_extras = []
-        light_extras = []
-        for vec in ptrs[0][f"wqkv"]:
-            standby_extras.append(vec)
-            light_extras.append(vec)
-            break
-        for vec in ptrs[0][f"out_proj"]:
-            standby_extras.append(vec)
-            light_extras.append(vec)
-            break
-        for e in experts:
-            for vec in ptrs[0][e]["v1"]:
-                standby_extras.append(vec)
-                break
-        for vec in ptrs["lm_head"]:
-            standby_extras.append(vec)
-            light_extras.append(vec)
-            break
-
         self.ptrs = ptrs
-        self.standby_extras = standby_extras
-        self.light_extras = light_extras
 
     def __call__(self, k):
         return self.ptrs[k]
-
-    def get_extras(self, for_standby: bool = False) -> list[mx.array]:
-        return self.standby_extras if for_standby else self.light_extras
 
 
 class LruCache(OrderedDict):
@@ -282,9 +256,8 @@ class DistributedMoeBlock(nn.Module):
         for e in self.experts:
             if e not in job:
                 continue
-            expert_outs.append(
-                (self.act_fn(x @ ws["w1"].T) * (x @ ws["v1"].T)) @ ws["w2"]
-            )
+            y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
+            expert_outs.append(y)
             arr_map[e] = len(expert_outs) - 1
 
         expert_outs = mx.stack(expert_outs, axis=0)
@@ -307,7 +280,19 @@ class DistributedMoeBlock(nn.Module):
         tic = time.perf_counter_ns()
 
         ws = raw_weights(self.layer_num)
-        extras = raw_weights.get_extras() if batch_size > 1 else []
+        extras = []
+
+        if batch_size > 1:
+            for vec in ws["wqkv"]:
+                extras.append(vec)
+                break
+            for vec in ws["out_proj"]:
+                extras.append(vec)
+                break
+            for vec in raw_weights("lm_head"):
+                extras.append(vec)
+                break
+
         shard_outs = {}
         for bi, xt in enumerate(x):
             expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws, extras)
@@ -469,16 +454,28 @@ class Warmer:
         send_conn: connection.Connection,
     ):
         self.n_layers = args.n_layers
+        self.assigned_experts = args.ffn_config["assigned_experts"]
         self.raw_weights = raw_weights
         self.resv_conn = resv_conn
         self.send_conn = send_conn
 
     def warm(self) -> None:
-        mx.eval(
-            mx.sum(
-                mx.stack(self.raw_weights.get_extras(for_standby=True), axis=0), axis=0
-            )
-        )
+        ws = self.raw_weights(0)
+        extras = []
+        for vec in ws["wqkv"]:
+            extras.append(vec)
+            break
+        for vec in ws["out_proj"]:
+            extras.append(vec)
+            break
+        for e in self.assigned_experts:
+            for vec in ws[e]["v1"]:
+                extras.append(vec)
+                break
+        for vec in self.raw_weights("lm_head"):
+            extras.append(vec)
+            break
+        mx.eval(mx.sum(mx.stack(extras, axis=0), axis=0))
 
     def sync_w_oths(self):
         self.send_conn.send(True)  # signals that I am ready
