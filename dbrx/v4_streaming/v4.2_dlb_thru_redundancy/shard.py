@@ -280,7 +280,7 @@ class DistributedMoeBlock(nn.Module):
     def call_shard_n_all_dispatch(
         self,
         x: mx.array,
-        jobs: list[set],
+        jobs: list[dict],
         raw_weights: RawWeights,
         send_conn: connection.Connection,
     ) -> dict:
@@ -291,8 +291,11 @@ class DistributedMoeBlock(nn.Module):
         for bi, xt in enumerate(x):
             expert_outs = self.moe_shard(xt, jobs[bi], ws)
             # extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
-            extras = [vec + 1 for vec in raw_weights.light_extras]
-            mx.eval(expert_outs, extras)
+            if len(jobs) > 1:
+                extras = [vec + 1 for vec in raw_weights.light_extras]
+                mx.eval(expert_outs, extras)
+            else:
+                mx.eval(expert_outs)
             y.append(expert_outs)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
