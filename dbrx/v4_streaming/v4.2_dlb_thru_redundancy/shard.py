@@ -289,7 +289,7 @@ class DistributedMoeBlock(nn.Module):
         ws = raw_weights(self.layer_num)
         y = []
         for bi, xt in enumerate(x):
-            expert_outs = self.moe_shard(xt, jobs[bi], ws, extras)
+            expert_outs = self.moe_shard(xt, jobs[bi], ws)
             extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
             mx.eval(expert_outs, extras)
             y.append(expert_outs)
@@ -345,6 +345,7 @@ class DistributedMoeBlock(nn.Module):
             self.call_shard_n_all_dispatch, x, jobs, raw_weights, send_conn
         )
         comm_fut = executor.submit(self.all_combine, x.shape[0], resv_conn)
+        concurrent.futures.wait([compute_fut, comm_fut])
 
         moe_lat = compute_fut.result()[1]
         LOGS["moe_lat"].append(moe_lat)
