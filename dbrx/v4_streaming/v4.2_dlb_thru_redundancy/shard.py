@@ -337,7 +337,7 @@ class DistributedMoeBlock(nn.Module):
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs = self.allocate_jobs(inds)
+        jobs = self.allocate_jobs(scores, inds)
 
         tic = time.perf_counter_ns()
 
