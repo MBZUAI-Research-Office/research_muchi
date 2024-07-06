@@ -288,13 +288,11 @@ class DistributedMoeBlock(nn.Module):
         y = []
         for bi, xt in enumerate(x):
             expert_outs = self.moe_shard(xt, jobs[bi], ws)
-            # if len(jobs) > 1:
-            #     extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
-            #     mx.eval(expert_outs, extras)
-            # else:
-            #     mx.eval(expert_outs)
-            extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
-            mx.eval(expert_outs, extras)
+            if len(jobs) > 1:
+                extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
+                mx.eval(expert_outs, extras)
+            else:
+                mx.eval(expert_outs)
             y.append(expert_outs)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
