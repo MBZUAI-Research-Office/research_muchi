@@ -314,7 +314,6 @@ class DistributedMoeBlock(nn.Module):
                 yt.append(expert_outs)
 
             yt = mx.stack(yt, axis=-1).sum(axis=-1)
-            mx.eval(yt)
             y.append(yt)
 
         return y
