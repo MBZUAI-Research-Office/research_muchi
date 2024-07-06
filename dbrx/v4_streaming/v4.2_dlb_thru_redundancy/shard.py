@@ -267,26 +267,13 @@ class DistributedMoeBlock(nn.Module):
 
         return jobs
 
-    # def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
-    #     expert_outs = []
-    #     for e in job:
-    #         y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
-    #         expert_outs.append(y * job[e])  # multiply by score
+    def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
+        expert_outs = []
+        for e in job:
+            y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
+            expert_outs.append(y * job[e])  # multiply by score
 
-    #     return mx.stack(expert_outs, axis=-1).sum(axis=-1)
-
-    def moe_shard(self, x: mx.array, job: dict, ws: dict):
-        expert_outs, extras = [], []
-        for e in self.experts:
-            if e in job:
-                y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
-                expert_outs.append(y * job[e])  # multiply by score
-            else:
-                for vec in ws[e]["v1"]:
-                    extras.append(vec)
-                    break
-
-        return mx.stack(expert_outs, axis=-1).sum(axis=-1), extras
+        return mx.stack(expert_outs, axis=-1).sum(axis=-1)
 
     def call_shard_n_all_dispatch(
         self,
@@ -300,12 +287,14 @@ class DistributedMoeBlock(nn.Module):
         ws = raw_weights(self.layer_num)
         y = []
         for bi, xt in enumerate(x):
-            expert_outs, expert_extras = self.moe_shard(xt, jobs[bi], ws)
-            if len(jobs) > 1:
-                extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
-                mx.eval(expert_outs, extras)
-            else:
-                mx.eval(expert_outs, expert_extras)
+            expert_outs = self.moe_shard(xt, jobs[bi], ws)
+            # if len(jobs) > 1:
+            #     extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
+            #     mx.eval(expert_outs, extras)
+            # else:
+            #     mx.eval(expert_outs)
+            extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
+            mx.eval(expert_outs, extras)
             y.append(expert_outs)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
