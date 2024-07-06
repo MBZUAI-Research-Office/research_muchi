@@ -29,7 +29,6 @@ from serialization_utils import mx_to_bytes, bytes_to_mx
 
 DEFAULT_TEMP = 0.6
 DEFAULT_SEED = 7
-# DEFAULT_STARTUP_WARMING_PERIOD = 10  # unit: tokens
 
 # coroutines to be invoked when the event loop is shutting down
 # copied from:
@@ -297,7 +296,7 @@ class DistributedMoeBlock(nn.Module):
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
 
-        return y, time.perf_counter_ns() - tic
+        return mx.stack(y, axis=0), time.perf_counter_ns() - tic
 
     def all_combine(
         self,
@@ -314,7 +313,7 @@ class DistributedMoeBlock(nn.Module):
             yt = mx.stack(yt, axis=-1).sum(axis=-1)
             y.append(yt)
 
-        return y
+        return mx.stack(y, axis=0)
 
     def __call__(
         self,
@@ -352,8 +351,7 @@ class DistributedMoeBlock(nn.Module):
         LOGS["moe_lat"].append(moe_lat)
         LOGS["comm_lat"].append(time.perf_counter_ns() - tic - moe_lat)
 
-        y = [a + b for a, b in zip(compute_fut.result()[0], comm_fut.result())]
-        return mx.stack(y, axis=0).reshape(orig_shape)
+        return mx.add(compute_fut.result()[0], comm_fut.result()).reshape(orig_shape)
 
 
 class DecoderLayer(nn.Module):
@@ -763,9 +761,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         )
 
     async def start(self) -> None:
-
-        # global DEFAULT_STARTUP_WARMING_PERIOD
-
         async with AsyncExitStack() as es:
             oth_shards = []
             for url in self.config["oth_urls"]:
@@ -818,49 +813,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 gen["resp"] = self.resv_conn.recv()
                 gen["completed"].set()
                 self.gen_queue.popleft()
-
-            # while True:
-            #     if len(self.gen_queue) == 0 or DEFAULT_STARTUP_WARMING_PERIOD > 0:
-            #         await self.sync_w_oths(oth_shards, before_warming=True)
-            #         logging.info(f"warming...")
-            #         self.send_conn.send(
-            #             False
-            #         )  # signal Generator that this is a warming run
-
-            #         for li in range(self.config["n_layers"]):
-            #             await self.sync_w_oths(oth_shards, li=li)
-            #             self.send_conn.send(
-            #                 True
-            #             )  # signals warmer that this layer is done
-
-            #         DEFAULT_STARTUP_WARMING_PERIOD -= 1
-            #         if DEFAULT_STARTUP_WARMING_PERIOD == 0:
-            #             logging.info(f"completed startup warming")
-
-            #         continue
-
-            #     self.send_conn.send(
-            #         True
-            #     )  # signal Generator that this is a generate run
-            #     gen = self.gen_queue[0]
-            #     self.send_conn.send(gen["req"].prompt)
-            #     self.send_conn.send(gen["req"].max_tokens)
-
-            #     for _ in range(gen["req"].max_tokens):
-            #         batch_size = self.resv_conn.recv()
-            #         for li in range(self.config["n_layers"]):
-            #             for bi in range(batch_size):
-            #                 await self.all_dispatch_n_combine(li, bi, oth_shards)
-
-            #             self.buffer.reset(li)
-
-            #         continue_sig = self.resv_conn.recv()
-            #         if not continue_sig:
-            #             break
-
-            #     gen["resp"] = self.resv_conn.recv()
-            #     gen["completed"].set()
-            #     self.gen_queue.popleft()
 
 
 async def serve(
