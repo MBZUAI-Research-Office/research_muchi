@@ -291,7 +291,8 @@ class DistributedMoeBlock(nn.Module):
         for bi, xt in enumerate(x):
             expert_outs = self.moe_shard(xt, jobs[bi], ws)
             if len(jobs) > 1:
-                extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
+                # extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
+                extras = [vec + 1 for vec in raw_weights.light_extras]
                 mx.eval(expert_outs, extras)
             else:
                 mx.eval(expert_outs)
