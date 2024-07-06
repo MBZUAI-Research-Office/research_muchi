@@ -14,7 +14,14 @@ import grpc
 import shard_envoy_pb2
 import shard_envoy_pb2_grpc
 
-STATS = {"moe_lat": [], "comm_lat": [], "misc_lat": [], "experts_act": [], "prompt_eval_tp": [], "token_gen_tp": []}
+STATS = {
+    "moe_lat": [],
+    "comm_lat": [],
+    "misc_lat": [],
+    "experts_act": [],
+    "prompt_eval_tp": [],
+    "token_gen_tp": [],
+}
 DEFAULT_MAX_TOKENS = 100
 
 
@@ -65,7 +72,9 @@ async def make_inference_requests(
     print(f"throughput: {token_gen_tp:.3f} t/s")
 
     if output.gen_t_cnt >= max_tokens * 0.85:
-        avg_misc_lat = (1000 / token_gen_tp / 40) - output.avg_moe_lat - output.avg_comm_lat
+        avg_misc_lat = (
+            (1000 / token_gen_tp / 40) - output.avg_moe_lat - output.avg_comm_lat
+        )
         STATS["moe_lat"].append(output.avg_moe_lat)
         STATS["comm_lat"].append(output.avg_comm_lat)
         STATS["misc_lat"].append(avg_misc_lat)
@@ -113,7 +122,9 @@ async def start(
     print(f"AVG MoE latency: {statistics.mean(STATS['moe_lat'])} ms")
     print(f"AVG Comm latency: {statistics.mean(STATS['comm_lat'])} ms")
     print(f"AVG Misc latency: {statistics.mean(STATS['misc_lat'])} ms")
-    print(f"AVG Num Experts Activated Per Node: {statistics.mean(STATS['experts_act'])}")
+    print(
+        f"AVG Num Experts Activated Per Node: {statistics.mean(STATS['experts_act'])}"
+    )
     print(f"AVG Prompt Eval TP: {statistics.mean(STATS['prompt_eval_tp'])} t/s")
     print(f"AVG Token Gen TP: {statistics.mean(STATS['token_gen_tp'])} t/s")
     pprint.pp(STATS)
@@ -139,4 +150,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     logging.basicConfig()
-    asyncio.run(start(args.config_path, args.prompt, args.prompt_path, args.n_samples, args.max_tokens))
+    asyncio.run(
+        start(
+            args.config_path,
+            args.prompt,
+            args.prompt_path,
+            args.n_samples,
+            args.max_tokens,
+        )
+    )
