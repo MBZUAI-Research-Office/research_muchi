@@ -261,21 +261,40 @@ class DistributedMoeBlock(nn.Module):
 
             n_warmups = max_loads[i] - len(jobs[i])
             for _ in range(n_warmups):
-                jobs[i][self.lru_cache.get_lru()] = 0
+                jobs[i][self.lru_cache.get_lru()] = mx.array(0, scores.dtype)
 
             LOGS["experts_act"].append(len(jobs[i]))
 
         return jobs
 
-    def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
-        expert_outs = []
-        for e in self.experts:
-            if e not in job:
-                continue
-            y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
-            expert_outs.append(y * job[e])  # multiply by score
+    # def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
+    #     expert_outs = []
+    #     for e in self.experts:
+    #         if e not in job:
+    #             continue
+    #         y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
+    #         expert_outs.append(y * job[e])  # multiply by score
 
-        return mx.stack(expert_outs, axis=-1).sum(axis=-1)
+    #     return mx.stack(expert_outs, axis=-1).sum(axis=-1)
+
+
+    def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
+        v1s, w1s, w2s, cs = [], [], [], []
+        for e in job:
+            v1s.append(ws[e]["v1"].T)
+            w1s.append(ws[e]["w1"].T)
+            w2s.append(ws[e]["w2"])
+            cs.append(job[e])
+
+        N = len(job)
+        xs = mx.tile(x, (1, N))
+        v1s = mx.concatenate(v1s, axis=-1)
+        w1s = mx.concatenate(w1s, axis=-1)
+        w2s = mx.concatenate(w2s, axis=-1)
+        cs = mx.stack(cs, axis=0)
+        ys = (self.act_fn(xs @ w1s) * (x @ v1s)) @ w2s
+
+        return (ys.reshape(*x.shape, N) * cs).sum(axis=-1)
 
     def call_shard_n_all_dispatch(
         self,
@@ -291,8 +310,7 @@ class DistributedMoeBlock(nn.Module):
         for bi, xt in enumerate(x):
             expert_outs = self.moe_shard(xt, jobs[bi], ws)
             if len(jobs) > 1:
-                # extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
-                extras = [vec + 1 for vec in raw_weights.light_extras]
+                extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
                 mx.eval(expert_outs, extras)
             else:
                 mx.eval(expert_outs)
