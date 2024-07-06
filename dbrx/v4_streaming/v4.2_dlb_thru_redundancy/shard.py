@@ -267,34 +267,13 @@ class DistributedMoeBlock(nn.Module):
 
         return jobs
 
-    # def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
-    #     expert_outs = []
-    #     for e in self.experts:
-    #         if e not in job:
-    #             continue
-    #         y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
-    #         expert_outs.append(y * job[e])  # multiply by score
-
-    #     return mx.stack(expert_outs, axis=-1).sum(axis=-1)
-
-
     def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
-        v1s, w1s, w2s, cs = [], [], [], []
+        expert_outs = []
         for e in job:
-            v1s.append(ws[e]["v1"].T)
-            w1s.append(ws[e]["w1"].T)
-            w2s.append(ws[e]["w2"])
-            cs.append(job[e])
+            y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
+            expert_outs.append(y * job[e])  # multiply by score
 
-        N = len(job)
-        xs = mx.tile(x, (1, N))
-        v1s = mx.concatenate(v1s, axis=-1)
-        w1s = mx.concatenate(w1s, axis=-1)
-        w2s = mx.concatenate(w2s, axis=-1)
-        cs = mx.stack(cs, axis=0)
-        ys = (self.act_fn(xs @ w1s) * (xs @ v1s)) @ w2s
-
-        return (ys.reshape(*x.shape, N) * cs).sum(axis=-1)
+        return mx.stack(expert_outs, axis=-1).sum(axis=-1)
 
     def call_shard_n_all_dispatch(
         self,
