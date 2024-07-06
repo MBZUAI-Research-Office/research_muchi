@@ -292,7 +292,7 @@ class DistributedMoeBlock(nn.Module):
         w1s = mx.concatenate(w1s, axis=-1)
         w2s = mx.concatenate(w2s, axis=-1)
         cs = mx.stack(cs, axis=0)
-        ys = (self.act_fn(xs @ w1s) * (x @ v1s)) @ w2s
+        ys = (self.act_fn(xs @ w1s) * (xs @ v1s)) @ w2s
 
         return (ys.reshape(*x.shape, N) * cs).sum(axis=-1)
 
