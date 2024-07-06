@@ -223,11 +223,10 @@ class DistributedMoeBlock(nn.Module):
         self.d_model = args.d_model
 
         self.url = args.ffn_config["shard_url"]
-        self.experts = args.ffn_config["assigned_experts"]
         self.e_to_g = args.ffn_config["e_to_g"]
         self.dlb_groups = args.ffn_config["dlb_groups"]
         self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
-        self.lru_cache = LruCache.fromkeys(self.experts)
+        self.lru_cache = LruCache.fromkeys(args.ffn_config["assigned_experts"])
 
         self.n_experts_in_cluster = args.ffn_config["moe_num_experts"]
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
@@ -271,7 +270,7 @@ class DistributedMoeBlock(nn.Module):
         expert_outs, cs = [], []
         for e in job:
             y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
-            expert_outs.append(y)  # multiply by score
+            expert_outs.append(y)
             cs.append(job[e])
 
         return (mx.stack(expert_outs, axis=-1) * mx.stack(cs, axis=0)).sum(axis=-1)
