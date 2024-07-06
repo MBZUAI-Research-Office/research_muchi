@@ -783,6 +783,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
             while True:
                 if len(self.gen_queue) == 0:
+                    await asyncio.sleep(0)
                     continue
 
                 await self.sync_w_oths(oth_shards, before_warming=True)
