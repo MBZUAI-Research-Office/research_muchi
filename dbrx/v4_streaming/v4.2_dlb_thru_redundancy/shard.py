@@ -351,8 +351,6 @@ class DistributedMoeBlock(nn.Module):
         LOGS["moe_lat"].append(moe_lat)
         LOGS["comm_lat"].append(time.perf_counter_ns() - tic - moe_lat)
 
-        # y = [a + b for a, b in zip(compute_fut.result()[0], comm_fut.result())]
-        # y = mx.stack(y, axis=0).reshape(orig_shape)
         return (
             mx.stack([compute_fut.result()[0], comm_fut.result()], axis=-1)
             .sum(axis=-1)
