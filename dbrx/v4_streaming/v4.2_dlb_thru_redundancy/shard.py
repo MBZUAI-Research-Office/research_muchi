@@ -273,7 +273,7 @@ class DistributedMoeBlock(nn.Module):
             y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
             expert_outs.append(y * job[e])  # multiply by score
 
-        return mx.stack(expert_outs, axis=-1).sum(axis=-1)
+        return mx.stack(expert_outs, axis=-1)
 
     def call_shard_n_all_dispatch(
         self,
@@ -293,6 +293,7 @@ class DistributedMoeBlock(nn.Module):
                 mx.eval(expert_outs, extras)
             else:
                 mx.eval(expert_outs)
+            expert_outs = expert_outs.sum(axis=-1)
             y.append(expert_outs)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
