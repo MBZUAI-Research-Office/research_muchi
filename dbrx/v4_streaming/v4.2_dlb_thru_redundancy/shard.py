@@ -302,7 +302,7 @@ class DistributedMoeBlock(nn.Module):
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
 
-        return mx.stack(y, axis=0), time.perf_counter_ns() - tic
+        return y, time.perf_counter_ns() - tic
 
     def all_combine(
         self,
@@ -319,7 +319,7 @@ class DistributedMoeBlock(nn.Module):
             yt = mx.stack(yt, axis=-1).sum(axis=-1)
             y.append(yt)
 
-        return mx.stack(y, axis=0)
+        return y
 
     def __call__(
         self,
@@ -357,11 +357,8 @@ class DistributedMoeBlock(nn.Module):
         LOGS["moe_lat"].append(moe_lat)
         LOGS["comm_lat"].append(time.perf_counter_ns() - tic - moe_lat)
 
-        return (
-            mx.stack([compute_fut.result()[0], comm_fut.result()], axis=-1)
-            .sum(axis=-1)
-            .reshape(orig_shape)
-        )
+        y = [a + b for a, b in zip(compute_fut.result()[0], comm_fut.result())]
+        return mx.stack(y, axis=0).reshape(orig_shape)
 
 
 class DecoderLayer(nn.Module):
@@ -611,6 +608,7 @@ class Generator:
                 for k in ["moe_lat", "comm_lat", "experts_act"]:
                     if len(LOGS[k]) <= 40:
                         # no token generated
+                        LOGS[k] = []
                         res.append(0)
                         continue
                     avg = statistics.mean(LOGS[k][40:])
