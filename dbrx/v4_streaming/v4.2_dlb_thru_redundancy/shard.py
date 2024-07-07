@@ -69,12 +69,14 @@ class RawWeights:
     def __init__(
         self,
         n_layers: int,
+        wte: mx.array,
         wqkv: mx.array,
         out_proj: mx.array,
         experts: dict,
         lm_head: mx.array,
     ) -> None:
         ptrs = {i: {} for i in range(n_layers)}
+        ptrs["wte"] = wte
         for i, mat in enumerate(wqkv["weights"]):
             ptrs[i]["wqkv"] = mat
         for i, mat in enumerate(out_proj["weights"]):
@@ -94,6 +96,10 @@ class RawWeights:
 
         standby_extras = []
         light_extras = []
+        for vec in ptrs["wte"]:
+            standby_extras.append(vec)
+            light_extras.append(vec)
+            break
         for vec in ptrs[0]["wqkv"]:
             standby_extras.append(vec)
             light_extras.append(vec)
@@ -509,6 +515,7 @@ class Generator:
 
         raw_weights = RawWeights(
             self.model_args.n_layers,
+            oth_non_es["wte.weight"],  # lookup table
             wqkv,
             out_proj,
             experts,
@@ -516,7 +523,6 @@ class Generator:
         )
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
         model.load_weights(list(oth_non_es.items()))
-        # mx.eval(model.parameters())
         model.eval()
 
         return model, Warmer(
