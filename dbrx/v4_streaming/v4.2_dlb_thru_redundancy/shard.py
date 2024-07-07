@@ -1,4 +1,4 @@
-#!/Users/xiangruike/miniconda3/envs/dbrx_enhanced/bin/python
+#!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
 from contextlib import AsyncExitStack
 from collections import deque, OrderedDict
