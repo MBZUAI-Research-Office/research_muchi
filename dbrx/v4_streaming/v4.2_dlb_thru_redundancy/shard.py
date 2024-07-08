@@ -456,8 +456,7 @@ class DBRX(nn.Module):
             cache = [None] * len(self.blocks)
 
         # h.shape = (sample_size, sequence_length, d_model)
-        batch_size = h.shape[0] * T
-        self.send_conn.send(batch_size)
+        self.send_conn.send(h.shape[0] * T)
 
         for e, layer in enumerate(self.blocks):
             h, cache[e] = layer(
@@ -471,10 +470,7 @@ class DBRX(nn.Module):
             )
 
         y = self.norm_f(h) @ self.raw_weights("lm_head").T
-        if batch_size > 1:
-            mx.eval(y, *self.runtime_warmup_calc())
-        else:
-            mx.eval(y)
+        mx.eval(y, *self.runtime_warmup_calc())
         return y, cache
 
 
