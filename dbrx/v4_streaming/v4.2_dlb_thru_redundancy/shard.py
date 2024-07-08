@@ -352,11 +352,7 @@ class DistributedMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
-        batch_size = x.shape[0]
-        if batch_size > 1:
-            mx.eval(inds, scores, self.moe_shard_warmup_calc(raw_weights))
-        else:
-            mx.eval(inds, scores)
+        mx.eval(inds, scores)
 
         inds = inds.tolist()
         jobs = self.allocate_jobs(scores, inds, raw_weights.expert_lru)
@@ -366,7 +362,7 @@ class DistributedMoeBlock(nn.Module):
         compute_fut = executor.submit(
             self.call_shard_n_all_dispatch, x, jobs, raw_weights, send_conn
         )
-        comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
+        comm_fut = executor.submit(self.all_combine, x.shape[0], resv_conn)
         concurrent.futures.wait([compute_fut, comm_fut])
 
         moe_lat = compute_fut.result()[1]
