@@ -314,8 +314,6 @@ class DistributedMoeBlock(nn.Module):
                 yt.append(expert_outs)
 
             yt = mx.stack(yt, axis=-1).sum(axis=-1)
-            if batch_size > 1:
-                mx.eval(yt)
             y.append(yt)
 
         return mx.stack(y, axis=0)
@@ -444,12 +442,11 @@ class Warmer:
     ):
         self.n_layers = args.n_layers
         self.warmup_vecs = raw_weights.ne_warmup + raw_weights.e_warmup
-        self.raw_weights = raw_weights
         self.resv_conn = resv_conn
         self.send_conn = send_conn
 
-    def warm(self) -> None:
-        mx.eval(mx.sum(mx.stack(self.warmup_vecs, axis=0), axis=0))
+    def get_warmup_calc(self) -> mx.array:
+        return mx.sum(mx.stack(self.warmup_vecs, axis=0), axis=0)
 
     def sync_w_oths(self):
         self.send_conn.send(True)  # signals that I am ready
@@ -457,7 +454,7 @@ class Warmer:
 
     def __call__(self):
         for _ in range(self.n_layers):
-            self.warm()
+            mx.eval(self.get_warmup_calc())
             self.sync_w_oths()
 
 
@@ -561,6 +558,9 @@ class Generator:
             logits, cache = self.model(y[None], executor, cache=cache)
             logits = logits[:, -1, :]
             y = sample(logits)
+
+            if n == 0:
+                mx.eval(y, self.warmer.get_warmup_calc())
 
             token = y.item()  # get word ID
             if n == 0:
