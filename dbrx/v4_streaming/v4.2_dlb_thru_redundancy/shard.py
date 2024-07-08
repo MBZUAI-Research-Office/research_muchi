@@ -122,7 +122,7 @@ class RawWeights:
         self.ptrs = ptrs
         self.ne_warmup = ne_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
-        self.dummy_x = mx.ones((1, lm_head.shape[-1]), dtype=lm_head.dtype)
+        self.dummy_x = mx.ones((lm_head.shape[-1],), dtype=lm_head.dtype)
         mx.eval(self.dummy_x)
 
     def __call__(self, k):
