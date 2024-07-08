@@ -123,6 +123,7 @@ class RawWeights:
         self.ne_warmup = ne_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
         self.dummy_x = mx.ones((lm_head.shape[-1],), dtype=lm_head.dtype)
+        self.dummy_job = {e: mx.array(1, dtype=lm_head.dtype) for e in experts}
         mx.eval(self.dummy_x)
 
     def __call__(self, k):
@@ -404,12 +405,8 @@ class DBRX(nn.Module):
         self.resv_conn.recv()  # confirms that everyone else is done
 
     def warmup_calc(self) -> tuple:
-        dummy_job = {}
-        dummy_job[self.raw_weights.expert_lru.get_lru()] = mx.array(
-            1, dtype=self.raw_weights.dummy_x.dtype
-        )
         return self.blocks[0].ffn.moe_shard(
-            self.raw_weights.dummy_x, dummy_job, self.raw_weights, True
+            self.raw_weights.dummy_x, self.raw_weights.dummy_job, self.raw_weights, True
         )
 
     def prewarm(self):
