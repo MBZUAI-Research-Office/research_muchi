@@ -119,12 +119,19 @@ class RawWeights:
             ne_warmup.append(vec)
             break
 
+        e_warmup = []
+        for e in experts:
+            for vec in ptrs[0][e]["v1"]:
+                e_warmup.append(vec)
+                break
+
         self.ptrs = ptrs
         self.ne_warmup = ne_warmup
+        self.e_warmup = e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
-        self.dummy_x = mx.ones((lm_head.shape[-1],), dtype=lm_head.dtype)
-        self.dummy_job = {e: mx.array(1, dtype=lm_head.dtype) for e in experts}
-        mx.eval(self.dummy_x)
+        # self.dummy_x = mx.ones((lm_head.shape[-1],), dtype=lm_head.dtype)
+        # self.dummy_job = {e: mx.array(1, dtype=lm_head.dtype) for e in experts}
+        # mx.eval(self.dummy_x)
 
     def __call__(self, k):
         return self.ptrs[k]
@@ -404,14 +411,15 @@ class DBRX(nn.Module):
         self.send_conn.send(True)  # signals that I am ready
         self.resv_conn.recv()  # confirms that everyone else is done
 
-    def warmup_calc(self) -> tuple:
-        return self.blocks[0].ffn.moe_shard(
-            self.raw_weights.dummy_x, self.raw_weights.dummy_job, self.raw_weights, True
-        )
+    # def warmup_calc(self) -> tuple:
+    #     return self.blocks[0].ffn.moe_shard(
+    #         self.raw_weights.dummy_x, self.raw_weights.dummy_job, self.raw_weights, True
+    #     )
 
     def prewarm(self):
+        vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
         for _ in range(self.n_layers):
-            mx.eval(self.warmup_calc())
+            mx.eval(mx.sum(mx.stack(vecs, axis=0), axis=0))
             self.sync_w_oths()
 
     def __call__(
