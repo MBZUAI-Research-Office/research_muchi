@@ -23,12 +23,14 @@ class WeightsPreprocessor:
         input_path: str,
         output_path: str,
         batching_strategy: int,
+        skip_experts: bool,
         skip_sep: bool,
         clean_sep: bool,
     ) -> None:
         self.input_path = Path(input_path)
         self.output_path = Path(output_path)
         self.batching_strategy = batching_strategy
+        self.skip_experts = skip_experts
         self.skip_sep = skip_sep
         self.clean_sep = clean_sep
 
@@ -156,19 +158,36 @@ class WeightsPreprocessor:
         self.clean_if_told(sep_paths)
 
     def batch_non_experts(self, num_layers: int) -> None:
-        non_expert_weights = {}
+        insig_weights = {}
+        wqkv_weights = []
+        out_proj_weights = []
         sep_paths = []
         for i in range(num_layers):
             path = self.input_path / f"block{i}-attention-and-router.safetensors"
-            non_expert_weights.update(safetensors.torch.load_file(path))
             sep_paths.append(path)
+            weights = safetensors.torch.load_file(path)
+            wqkv_weights.append(
+                weights.pop(f"blocks.{i}.norm_attn_norm.attn.Wqkv.weight")
+            )
+            out_proj_weights.append(
+                weights.pop(f"blocks.{i}.norm_attn_norm.attn.out_proj.weight")
+            )
+            insig_weights.update(weights)
 
         non_layer_path = self.input_path / f"non-layer.safetensors"
-        non_expert_weights.update(safetensors.torch.load_file(non_layer_path))
+        insig_weights.update(safetensors.torch.load_file(non_layer_path))
         sep_paths.append(non_layer_path)
 
         safetensors.torch.save_file(
-            non_expert_weights, self.output_path / f"non-expert.safetensors"
+            insig_weights, self.output_path / f"non-expert.safetensors"
+        )
+        safetensors.torch.save_file(
+            {"weights": torch.stack(wqkv_weights, dim=0)},
+            self.output_path / f"wqkv.safetensors",
+        )
+        safetensors.torch.save_file(
+            {"weights": torch.stack(out_proj_weights, dim=0)},
+            self.output_path / f"out_proj.safetensors",
         )
 
         print(f"batched non-expert weights")
@@ -211,9 +230,11 @@ class WeightsPreprocessor:
     def batch_weights(self, num_layers: int, num_experts: int):
         tic = time.perf_counter()
 
-        for i in range(num_experts):
-            self.batch_expert(i, num_layers)
-            gc.collect()
+        if not self.skip_experts:
+            for i in range(num_experts):
+                self.batch_expert(i, num_layers)
+                gc.collect()
+
         self.batch_non_experts(num_layers)
         gc.collect()
 
@@ -254,6 +275,7 @@ if __name__ == "__main__":
         default=0,
         help="0: no batching, 1: batch by expert, 2: batch by and within expert",
     )
+    parser.add_argument("--skip-experts", action="store_true")
     parser.add_argument("--skip-sep", action="store_true")
     parser.add_argument("--clean-sep", action="store_true")
     args = parser.parse_args()
@@ -263,6 +285,7 @@ if __name__ == "__main__":
         args.input_path,
         args.output_path,
         args.batching_strategy,
+        args.skip_experts,
         args.skip_sep,
         args.clean_sep,
     )

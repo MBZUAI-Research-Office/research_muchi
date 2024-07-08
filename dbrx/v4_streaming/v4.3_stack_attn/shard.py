@@ -80,9 +80,18 @@ class RawWeights:
     def __init__(
         self,
         n_layers: int,
+        wte: mx.array,
+        wqkv: mx.array,
+        out_proj: mx.array,
         experts: dict,
+        lm_head: mx.array,
     ) -> None:
         ptrs = {i: {} for i in range(n_layers)}
+        ptrs["wte"] = wte
+        for i, mat in enumerate(wqkv["weights"]):
+            ptrs[i]["wqkv"] = mat
+        for i, mat in enumerate(out_proj["weights"]):
+            ptrs[i]["out_proj"] = mat
         for e, d in experts.items():
             for j, mat in enumerate(d["weights"]):
                 i = j // 3
@@ -94,6 +103,21 @@ class RawWeights:
                     ptrs[i][e]["w1"] = mat
                 else:
                     ptrs[i][e]["w2"] = mat
+        ptrs["lm_head"] = lm_head
+
+        ne_warmup = []
+        for vec in ptrs["wte"]:
+            ne_warmup.append(vec)
+            break
+        for vec in ptrs[0]["wqkv"]:
+            ne_warmup.append(vec)
+            break
+        for vec in ptrs[0]["out_proj"]:
+            ne_warmup.append(vec)
+            break
+        for vec in ptrs["lm_head"]:
+            ne_warmup.append(vec)
+            break
 
         e_warmup = []
         for e in experts:
@@ -102,13 +126,21 @@ class RawWeights:
                 break
 
         self.ptrs = ptrs
+        self.ne_warmup = ne_warmup
         self.e_warmup = e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
+        # self.dummy_x = mx.ones((lm_head.shape[-1],), dtype=lm_head.dtype)
+        # self.dummy_job = {e: mx.array(1, dtype=lm_head.dtype) for e in experts}
+        # mx.eval(self.dummy_x)
+
+    def __call__(self, k):
+        return self.ptrs[k]
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
+        self.layer_num = layer_num
         self.num_heads = args.n_heads
         self.d_model = args.d_model
         self.head_dim = args.d_model // args.n_heads
@@ -116,13 +148,6 @@ class Attention(nn.Module):
         self.clip_qkv = args.attn_config["clip_qkv"]
 
         self.scale = self.head_dim**-0.5
-
-        self.Wqkv = nn.Linear(
-            args.d_model,
-            (self.num_key_value_heads * 2 + self.num_heads) * self.head_dim,
-            bias=False,
-        )
-        self.out_proj = nn.Linear(args.d_model, args.d_model, bias=False)
         self.rope = nn.RoPE(
             self.head_dim,
             traditional=False,
@@ -132,11 +157,12 @@ class Attention(nn.Module):
     def __call__(
         self,
         x: mx.array,
+        raw_weights: RawWeights,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-
-        qkv = self.Wqkv(x)
+        ws = raw_weights(self.layer_num)
+        qkv = x @ ws["wqkv"].T
         qkv = mx.clip(qkv, a_min=-self.clip_qkv, a_max=self.clip_qkv)
         splits = [self.d_model, self.d_model + self.head_dim * self.num_key_value_heads]
         queries, keys, values = mx.split(qkv, splits, axis=-1)
@@ -164,23 +190,24 @@ class Attention(nn.Module):
             queries, keys, values, scale=self.scale, mask=mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return self.out_proj(output), (keys, values)
+        return output @ ws["out_proj"].T, (keys, values)
 
 
 class NormAttnNorm(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
         self.norm_1 = nn.LayerNorm(args.d_model, bias=False)
         self.norm_2 = nn.LayerNorm(args.d_model, bias=False)
-        self.attn = Attention(args)
+        self.attn = Attention(args, layer_num)
 
     def __call__(
         self,
         x: mx.array,
+        raw_weights: RawWeights,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-        h, cache = self.attn(self.norm_1(x), mask=mask, cache=cache)
+        h, cache = self.attn(self.norm_1(x), raw_weights, mask=mask, cache=cache)
         x = h + x
         return x, self.norm_2(x), cache
 
@@ -246,12 +273,19 @@ class DistributedMoeBlock(nn.Module):
 
         return jobs
 
-    def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
+    def moe_shard(
+        self, x: mx.array, job: dict, raw_weights: RawWeights, warms_ne: bool
+    ) -> mx.array:
+        ws = raw_weights(self.layer_num)
         expert_outs, cs = [], []
         for e in job:
             y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
             expert_outs.append(y)
             cs.append(job[e])
+        if warms_ne:
+            for vec in raw_weights.ne_warmup:
+                expert_outs.append(vec)
+                cs.append(mx.array(0, dtype=x.dtype))
 
         y = (mx.stack(expert_outs, axis=-1) * mx.stack(cs, axis=0)).sum(axis=-1)
         mx.eval(y)
@@ -266,10 +300,9 @@ class DistributedMoeBlock(nn.Module):
     ) -> dict:
         tic = time.perf_counter_ns()
 
-        ws = raw_weights.ptrs[self.layer_num]
         y = []
         for bi, xt in enumerate(x):
-            yt = self.moe_shard(xt, jobs[bi], ws)
+            yt = self.moe_shard(xt, jobs[bi], raw_weights, len(jobs) > 1)
             y.append(yt)
             send_conn.send_bytes(mx_to_bytes(yt))
             send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
@@ -340,7 +373,7 @@ class DecoderLayer(nn.Module):
     def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
         self.ffn = DistributedMoeBlock(args, layer_num)
-        self.norm_attn_norm = NormAttnNorm(args)
+        self.norm_attn_norm = NormAttnNorm(args, layer_num)
 
     def __call__(
         self,
@@ -352,7 +385,7 @@ class DecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-        r, h, cache = self.norm_attn_norm(x, mask, cache)
+        r, h, cache = self.norm_attn_norm(x, raw_weights, mask, cache)
         out = self.ffn(h, raw_weights, resv_conn, send_conn, executor) + r
         return out, cache
 
@@ -373,15 +406,20 @@ class DBRX(nn.Module):
         self.resv_conn = resv_conn
         self.send_conn = send_conn
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
-        self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
 
     def sync_w_oths(self):
         self.send_conn.send(True)  # signals that I am ready
         self.resv_conn.recv()  # confirms that everyone else is done
 
+    # def warmup_calc(self) -> tuple:
+    #     return self.blocks[0].ffn.moe_shard(
+    #         self.raw_weights.dummy_x, self.raw_weights.dummy_job, self.raw_weights, True
+    #     )
+
     def prewarm(self):
+        vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
         for _ in range(self.n_layers):
-            mx.eval(mx.sum(mx.stack(self.raw_weights.e_warmup, axis=0), axis=0))
+            mx.eval(mx.sum(mx.stack(vecs, axis=0), axis=0))
             self.sync_w_oths()
 
     def __call__(
@@ -415,7 +453,7 @@ class DBRX(nn.Module):
                 cache[e],
             )
 
-        return self.lm_head(self.norm_f(h)), cache
+        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
 
 
 class Generator:
@@ -458,19 +496,27 @@ class Generator:
         return model_args
 
     def load_model(self) -> DBRX:
+        wqkv = mx.load(str(self.model_path / f"wqkv.safetensors"))
+        out_proj = mx.load(str(self.model_path / f"out_proj.safetensors"))
+        oth_non_es = mx.load(str(self.model_path / f"non-expert.safetensors"))
         # sample:
         # {0: {"weights": mx.array([0, 1, 2, 3])}}
         experts = {
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
             for e in self.model_args.ffn_config["assigned_experts"]
         }
-        mx.eval(experts)
+        mx.eval(wqkv, out_proj, oth_non_es, experts)
 
-        raw_weights = RawWeights(self.model_args.n_layers, experts)
+        raw_weights = RawWeights(
+            self.model_args.n_layers,
+            oth_non_es["wte.weight"],  # lookup table
+            wqkv,
+            out_proj,
+            experts,
+            oth_non_es.pop("lm_head.weight"),
+        )
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
-        non_expert_weights = mx.load(str(self.model_path / f"non-expert.safetensors"))
-        model.load_weights(list(non_expert_weights.items()))
-        mx.eval(model.parameters())
+        model.load_weights(list(oth_non_es.items()))
         model.eval()
 
         return model
