@@ -561,11 +561,10 @@ class Generator:
 
             if n == 0:
                 mx.eval(y, self.warmer.get_warmup_calc())
-
-            token = y.item()  # get word ID
-            if n == 0:
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
+
+            token = y.item()  # get word ID
             if token == self.tokenizer.eos_token_id:
                 self.send_conn.send(False)
                 break
