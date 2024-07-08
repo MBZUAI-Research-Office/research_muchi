@@ -131,7 +131,6 @@ class RawWeights:
         self.e_warmup = e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
         self.dummy_x = dummy_x
-        self.moe_shard_warmup_job = {e: mx.array(1, wte.dtype) for e in experts}
 
     def __call__(self, k):
         return self.ptrs[k]
@@ -267,7 +266,7 @@ class DistributedMoeBlock(nn.Module):
 
             n_warmups = max_loads[i] - len(jobs[i])
             for _ in range(n_warmups):
-                jobs[i][expert_lru.get_lru()] = mx.array(0, scores.dtype)
+                jobs[i][expert_lru.get_lru()] = mx.array(0, dtype=scores.dtype)
 
             LOGS["experts_act"].append(len(jobs[i]))
 
@@ -283,9 +282,11 @@ class DistributedMoeBlock(nn.Module):
         return (mx.stack(expert_outs, axis=-1) * mx.stack(cs, axis=0)).sum(axis=-1)
 
     def moe_shard_warmup_calc(self, raw_weights: RawWeights) -> mx.array:
+        dummy_job = {}
+        dummy_job[raw_weights.expert_lru.get_lru()] = mx.array(1, dtype=raw_weights.dummy_x.dtype)
         return self.moe_shard(
             raw_weights.dummy_x,
-            raw_weights.moe_shard_warmup_job,
+            dummy_job,
             raw_weights(self.layer_num),
         )
 
