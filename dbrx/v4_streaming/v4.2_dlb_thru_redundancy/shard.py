@@ -283,7 +283,9 @@ class DistributedMoeBlock(nn.Module):
 
     def moe_shard_warmup_calc(self, raw_weights: RawWeights) -> mx.array:
         dummy_job = {}
-        dummy_job[raw_weights.expert_lru.get_lru()] = mx.array(1, dtype=raw_weights.dummy_x.dtype)
+        dummy_job[raw_weights.expert_lru.get_lru()] = mx.array(
+            1, dtype=raw_weights.dummy_x.dtype
+        )
         return self.moe_shard(
             raw_weights.dummy_x,
             dummy_job,
@@ -454,7 +456,8 @@ class DBRX(nn.Module):
             cache = [None] * len(self.blocks)
 
         # h.shape = (sample_size, sequence_length, d_model)
-        self.send_conn.send(h.shape[0] * T)  # let envoy know the batch size
+        batch_size = h.shape[0] * T
+        self.send_conn.send(batch_size)
 
         for e, layer in enumerate(self.blocks):
             h, cache[e] = layer(
@@ -468,7 +471,10 @@ class DBRX(nn.Module):
             )
 
         y = self.norm_f(h) @ self.raw_weights("lm_head").T
-        mx.eval(y, *self.runtime_warmup_calc())
+        if batch_size > 1:
+            mx.eval(y, *self.runtime_warmup_calc())
+        else:
+            mx.eval(y)
         return y, cache
 
 
