@@ -210,28 +210,28 @@ class DistributedMoeBlock(nn.Module):
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
         self.router = Router(args.d_model, self.n_experts_in_cluster)
 
-    def allocate_jobs(
-        self, scores: mx.array, inds: list[list[int]], expert_lru: LruCache
-    ) -> list[dict]:
+    def allocate_jobs(self, inds: list[list[int]], expert_lru: LruCache) -> tuple:
         jobs = []
+        job_map = []
         max_loads = []
 
-        for st, it in zip(scores, inds):
+        for activated_experts in inds:
             by_dlb_group = {}
             by_shard = {}
-            e_to_s = {}
+            jm = {}
 
-            for s, e in zip(st, it):
+            for e in activated_experts:
                 by_dlb_group.setdefault(self.e_to_g[e], []).append(e)
-                e_to_s[e] = s
 
             for g, es in by_dlb_group.items():
                 members = self.dlb_groups[g]["members"]
                 for i, e in enumerate(es):
                     url = members[i % len(members)]
-                    by_shard.setdefault(url, {})[e] = e_to_s[e]
+                    by_shard.setdefault(url, set()).add(e)
+                    jm[e] = url
 
-            jobs.append(by_shard.get(self.url, {}))
+            jobs.append(by_shard.get(self.url, set()))
+            job_map.append(jm)
             max_loads.append(max(len(v) for v in by_shard.values()))
 
         for i in range(len(jobs)):
@@ -240,58 +240,54 @@ class DistributedMoeBlock(nn.Module):
 
             n_warmups = max_loads[i] - len(jobs[i])
             for _ in range(n_warmups):
-                jobs[i][expert_lru.get_lru()] = mx.array(0, dtype=scores.dtype)
+                jobs[i].add(expert_lru.get_lru())
 
             LOGS["experts_act"].append(len(jobs[i]))
 
-        return jobs
+        return jobs, job_map
 
-    def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
-        expert_outs, cs = [], []
+    def moe_shard(self, x: mx.array, job: set, ws: dict) -> tuple[mx.array, dict]:
+        expert_outs = []
+        arr_map = {}
         for e in job:
             y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
             expert_outs.append(y)
-            cs.append(job[e])
+            arr_map[e] = len(expert_outs) - 1
 
-        y = (mx.stack(expert_outs, axis=-1) * mx.stack(cs, axis=0)).sum(axis=-1)
-        mx.eval(y)
-        return y
+        expert_outs = mx.stack(expert_outs, axis=0)
+        mx.eval(expert_outs)
+        return expert_outs, arr_map
 
     def call_shard_n_all_dispatch(
         self,
         x: mx.array,
-        jobs: list[dict],
+        jobs: list[set],
         raw_weights: RawWeights,
         send_conn: connection.Connection,
-    ) -> dict:
+    ):
         tic = time.perf_counter_ns()
 
         ws = raw_weights.ptrs[self.layer_num]
-        y = []
+        shard_outs = {}
         for bi, xt in enumerate(x):
-            yt = self.moe_shard(xt, jobs[bi], ws)
-            y.append(yt)
-            send_conn.send_bytes(mx_to_bytes(yt))
-            send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
+            expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws)
+            shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
+            send_conn.send_bytes(mx_to_bytes(expert_outs))
+            send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
 
-        return mx.stack(y, axis=0), time.perf_counter_ns() - tic
+        return shard_outs, time.perf_counter_ns() - tic
 
     def all_combine(
         self,
         batch_size: int,
         resv_conn: connection.Connection,
     ):
-        y = []
-        for _i in range(batch_size):
-            yt = []
-            for _j in range(self.n_oth_shards):
-                expert_outs = bytes_to_mx(resv_conn.recv_bytes())
-                yt.append(expert_outs)
-
-            yt = mx.stack(yt, axis=-1).sum(axis=-1)
-            y.append(yt)
-
-        return mx.stack(y, axis=0)
+        shard_outs = {}
+        for _ in range(batch_size * self.n_oth_shards):
+            expert_outs = bytes_to_mx(resv_conn.recv_bytes())
+            url, li, bi, arr_map = pickle.loads(resv_conn.recv_bytes())
+            shard_outs.setdefault(url, {})[bi] = (expert_outs, arr_map)
+        return shard_outs
 
     def __call__(
         self,
@@ -315,25 +311,41 @@ class DistributedMoeBlock(nn.Module):
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs = self.allocate_jobs(scores, inds, raw_weights.expert_lru)
+        jobs, job_map = self.allocate_jobs(inds, raw_weights.expert_lru)
+        batch_size = x.shape[0]
+        shard_outs = {}
 
         tic = time.perf_counter_ns()
 
         compute_fut = executor.submit(
             self.call_shard_n_all_dispatch, x, jobs, raw_weights, send_conn
         )
-        comm_fut = executor.submit(self.all_combine, x.shape[0], resv_conn)
-        concurrent.futures.wait([compute_fut, comm_fut])
+        comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
+        fut_map = {compute_fut: "moe", comm_fut: "comm"}
+        for fut in concurrent.futures.as_completed(fut_map):
+            if fut_map[fut] == "moe":
+                shard_outs.update(fut.result()[0])
+                LOGS["moe_lat"].append(fut.result()[1])
+            else:
+                shard_outs.update(fut.result())
 
-        moe_lat = compute_fut.result()[1]
-        LOGS["moe_lat"].append(moe_lat)
-        LOGS["comm_lat"].append(time.perf_counter_ns() - tic - moe_lat)
+        LOGS["comm_lat"].append(time.perf_counter_ns() - tic - LOGS["moe_lat"][-1])
 
-        return (
-            mx.stack([compute_fut.result()[0], comm_fut.result()], axis=-1)
-            .sum(axis=-1)
-            .reshape(orig_shape)
-        )
+        y = []
+
+        for bi, st, it in zip(range(batch_size), scores, inds):
+            yt = []
+            for e in it:
+                url = job_map[bi][e]
+                expert_outs, arr_map = shard_outs[url][bi]
+                yt.append(expert_outs[arr_map[e]])
+
+            yt = mx.stack(yt, axis=-1)
+            yt = (yt * st).sum(axis=-1)
+            y.append(yt)
+
+        y = mx.stack(y, axis=0)
+        return y.reshape(orig_shape)
 
 
 class DecoderLayer(nn.Module):
@@ -680,16 +692,17 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 tg.create_task(dispatch(shard, data, metadata))
             wait_task = tg.create_task(self.buffer.wait_til_full(li, bi))
 
-        for d in wait_task.result():
+        for d, meta_d in wait_task.result():
             self.send_conn.send_bytes(d)
+            self.send_conn.send_bytes(meta_d)
 
     def SignalReady(self, request: shard_envoy_pb2.Identifier, context):
         self.buffer.put(True, request.li)
         return shard_envoy_pb2.Empty()
 
     def Receive(self, request: shard_envoy_pb2.ShardOuts, context):
-        li, bi = pickle.loads(request.metadata)
-        self.buffer.put(request.data, li, bi)
+        url, li, bi, arr_map = pickle.loads(request.metadata)
+        self.buffer.put((request.data, request.metadata), li, bi)
         return shard_envoy_pb2.Empty()
 
     async def Generate(self, request: shard_envoy_pb2.UsrIns, context):
