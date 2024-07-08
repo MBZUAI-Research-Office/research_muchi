@@ -397,7 +397,6 @@ class DBRX(nn.Module):
     ):
         super().__init__()
         self.raw_weights = raw_weights
-        self.warmup_vecs = raw_weights.ne_warmup + raw_weights.e_warmup
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.resv_conn = resv_conn
@@ -436,7 +435,8 @@ class DBRX(nn.Module):
             )
 
         y = self.norm_f(h) @ self.raw_weights("lm_head").T
-        mx.eval(y, mx.sum(mx.stack(self.warmup_vecs, axis=0), axis=0))
+        warmup_vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
+        mx.eval(y, mx.sum(mx.stack(warmup_vecs, axis=0), axis=0))
         return y, cache
 
 
