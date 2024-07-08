@@ -337,7 +337,7 @@ class DistributedMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
-        mx.eval(inds, scores)
+        mx.eval(inds, scores, mx.sum(mx.stack(raw_weights.e_warmup, axis=0), axis=0))
 
         inds = inds.tolist()
         jobs = self.allocate_jobs(scores, inds)
@@ -534,15 +534,11 @@ class Generator:
     ):
 
         def sample(logits: mx.array) -> Tuple[mx.array, float]:
-            # softmax_logits = mx.softmax(logits)
-
             if temp == 0:
                 token = mx.argmax(logits, axis=-1)
             else:
                 token = mx.random.categorical(logits * (1 / temp))
 
-            # prob = softmax_logits[0, token]
-            # return token, prob
             return token
 
         prompt_tokens = mx.array(self.tokenizer.encode(prompt))
