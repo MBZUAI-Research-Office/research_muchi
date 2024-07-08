@@ -131,7 +131,7 @@ class RawWeights:
         self.e_warmup = e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
         self.dummy_x = dummy_x
-        self.moe_shard_warmup_job = {e: 1 for e in experts}
+        self.moe_shard_warmup_job = {e: 1 for e in mx.array(1, wte.dtype)}
 
     def __call__(self, k):
         return self.ptrs[k]
