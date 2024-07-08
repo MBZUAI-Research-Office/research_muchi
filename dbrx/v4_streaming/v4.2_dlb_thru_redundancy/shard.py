@@ -85,7 +85,6 @@ class RawWeights:
         out_proj: mx.array,
         experts: dict,
         lm_head: mx.array,
-        dummy_x: mx.array,
     ) -> None:
         ptrs = {i: {} for i in range(n_layers)}
         ptrs["wte"] = wte
@@ -120,17 +119,11 @@ class RawWeights:
             ne_warmup.append(vec)
             break
 
-        e_warmup = []
-        for e in experts:
-            for vec in ptrs[0][e]["v1"]:
-                e_warmup.append(vec)
-                break
-
         self.ptrs = ptrs
         self.ne_warmup = ne_warmup
-        self.e_warmup = e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
-        self.dummy_x = dummy_x
+        self.dummy_x = mx.ones((1, lm_head.shape[-1]), dtype=lm_head.dtype)
+        mx.eval(self.dummy_x)
 
     def __call__(self, k):
         return self.ptrs[k]
@@ -272,25 +265,23 @@ class DistributedMoeBlock(nn.Module):
 
         return jobs
 
-    def moe_shard(self, x: mx.array, job: dict, ws: dict) -> mx.array:
+    def moe_shard(
+        self, x: mx.array, job: dict, raw_weights: RawWeights, warms_ne: bool
+    ) -> mx.array:
+        ws = raw_weights(self.layer_num)
         expert_outs, cs = [], []
         for e in job:
             y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
             expert_outs.append(y)
             cs.append(job[e])
+        if warms_ne:
+            for vec in raw_weights.ne_warmup:
+                expert_outs.append(vec)
+                cs.append(mx.array(0, dtype=x.dtype))
 
-        return (mx.stack(expert_outs, axis=-1) * mx.stack(cs, axis=0)).sum(axis=-1)
-
-    def moe_shard_warmup_calc(self, raw_weights: RawWeights) -> mx.array:
-        dummy_job = {}
-        dummy_job[raw_weights.expert_lru.get_lru()] = mx.array(
-            1, dtype=raw_weights.dummy_x.dtype
-        )
-        return self.moe_shard(
-            raw_weights.dummy_x,
-            dummy_job,
-            raw_weights(self.layer_num),
-        )
+        y = (mx.stack(expert_outs, axis=-1) * mx.stack(cs, axis=0)).sum(axis=-1)
+        mx.eval(y)
+        return y
 
     def call_shard_n_all_dispatch(
         self,
@@ -301,17 +292,11 @@ class DistributedMoeBlock(nn.Module):
     ) -> dict:
         tic = time.perf_counter_ns()
 
-        ws = raw_weights(self.layer_num)
         y = []
         for bi, xt in enumerate(x):
-            expert_outs = self.moe_shard(xt, jobs[bi], ws)
-            if len(jobs) > 1:
-                ne_warmup_calc = mx.sum(mx.stack(raw_weights.ne_warmup, axis=0), axis=0)
-                mx.eval(expert_outs, ne_warmup_calc)
-            else:
-                mx.eval(expert_outs)
-            y.append(expert_outs)
-            send_conn.send_bytes(mx_to_bytes(expert_outs))
+            yt = self.moe_shard(xt, jobs[bi], raw_weights, len(jobs) > 1)
+            y.append(yt)
+            send_conn.send_bytes(mx_to_bytes(yt))
             send_conn.send_bytes(pickle.dumps((self.layer_num, bi)))
 
         return mx.stack(y, axis=0), time.perf_counter_ns() - tic
@@ -418,20 +403,18 @@ class DBRX(nn.Module):
         self.send_conn.send(True)  # signals that I am ready
         self.resv_conn.recv()  # confirms that everyone else is done
 
-    def runtime_warmup_calc(self) -> tuple:
-        return (
-            self.blocks[0].ffn.moe_shard_warmup_calc(self.raw_weights),
-            mx.sum(mx.stack(self.raw_weights.ne_warmup, axis=0), axis=0),
+    def warmup_calc(self) -> tuple:
+        dummy_job = {}
+        dummy_job[self.raw_weights.expert_lru.get_lru()] = mx.array(
+            1, dtype=self.raw_weights.dummy_x.dtype
+        )
+        return self.blocks[0].ffn.moe_shard(
+            self.raw_weights.dummy_x, dummy_job, self.raw_weights, True
         )
 
     def prewarm(self):
-        mid = self.n_layers // 2
-        rep_vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
-        for i in range(self.n_layers):
-            if i < mid:
-                mx.eval(mx.sum(mx.stack(rep_vecs, axis=0), axis=0))
-            else:
-                mx.eval(*self.runtime_warmup_calc())
+        for _ in range(self.n_layers):
+            mx.eval(self.warmup_calc())
             self.sync_w_oths()
 
     def __call__(
@@ -465,9 +448,7 @@ class DBRX(nn.Module):
                 cache[e],
             )
 
-        y = self.norm_f(h) @ self.raw_weights("lm_head").T
-        mx.eval(y, *self.runtime_warmup_calc())
-        return y, cache
+        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
 
 
 class Generator:
@@ -519,8 +500,7 @@ class Generator:
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
             for e in self.model_args.ffn_config["assigned_experts"]
         }
-        dummy_x = mx.ones((1, self.model_args.d_model), dtype=wqkv["weights"].dtype)
-        mx.eval(wqkv, out_proj, oth_non_es, experts, dummy_x)
+        mx.eval(wqkv, out_proj, oth_non_es, experts)
 
         raw_weights = RawWeights(
             self.model_args.n_layers,
@@ -529,7 +509,6 @@ class Generator:
             out_proj,
             experts,
             oth_non_es.pop("lm_head.weight"),
-            dummy_x,
         )
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
         model.load_weights(list(oth_non_es.items()))
