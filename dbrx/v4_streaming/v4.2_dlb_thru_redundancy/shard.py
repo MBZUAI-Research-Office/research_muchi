@@ -110,9 +110,9 @@ class RawWeights:
 
         e_warmup = []
         for e in experts:
-            e_warmup.append(ptrs[0][e]["v1"])
-            e_warmup.append(ptrs[0][e]["w1"])
-            e_warmup.append(ptrs[0][e]["w2"])
+            for vec in ptrs[0][e]["v1"]:
+                e_warmup.append(vec)
+                break
 
         self.ptrs = ptrs
         self.ne_warmup = ne_warmup
@@ -443,15 +443,13 @@ class Warmer:
         send_conn: connection.Connection,
     ):
         self.n_layers = args.n_layers
+        self.warmup_vecs = raw_weights.ne_warmup + raw_weights.e_warmup
         self.raw_weights = raw_weights
         self.resv_conn = resv_conn
         self.send_conn = send_conn
 
     def warm(self) -> None:
-        mx.eval(
-            mx.sum(mx.stack(self.raw_weights.e_warmup, axis=0), axis=0),
-            mx.sum(mx.stack(self.raw_weights.ne_warmup, axis=0), axis=0),
-        )
+        mx.eval(mx.sum(mx.stack(self.warmup_vecs, axis=0), axis=0))
 
     def sync_w_oths(self):
         self.send_conn.send(True)  # signals that I am ready
