@@ -94,32 +94,29 @@ class RawWeights:
                     ptrs[i][e]["w2"] = mat
         ptrs["lm_head"] = lm_head
 
-        standby_extras = []
-        light_extras = []
+        ne_warmup = []
         for vec in ptrs["wte"]:
-            standby_extras.append(vec)
-            light_extras.append(vec)
+            ne_warmup.append(vec)
             break
         for vec in ptrs[0]["wqkv"]:
-            standby_extras.append(vec)
-            light_extras.append(vec)
+            ne_warmup.append(vec)
             break
         for vec in ptrs[0]["out_proj"]:
-            standby_extras.append(vec)
-            light_extras.append(vec)
+            ne_warmup.append(vec)
             break
-        for e in experts:
-            for vec in ptrs[0][e]["v1"]:
-                standby_extras.append(vec)
-                break
         for vec in ptrs["lm_head"]:
-            standby_extras.append(vec)
-            light_extras.append(vec)
+            ne_warmup.append(vec)
             break
 
+        e_warmup = []
+        for e in experts:
+            e_warmup.append(ptrs[0][e]["v1"])
+            e_warmup.append(ptrs[0][e]["w1"])
+            e_warmup.append(ptrs[0][e]["w2"])
+
         self.ptrs = ptrs
-        self.standby_extras = standby_extras
-        self.light_extras = light_extras
+        self.ne_warmup = ne_warmup
+        self.e_warmup = e_warmup
 
     def __call__(self, k):
         return self.ptrs[k]
@@ -294,7 +291,7 @@ class DistributedMoeBlock(nn.Module):
         for bi, xt in enumerate(x):
             expert_outs = self.moe_shard(xt, jobs[bi], ws)
             if len(jobs) > 1:
-                extras = mx.sum(mx.stack(raw_weights.light_extras, axis=0), axis=0)
+                extras = mx.sum(mx.stack(raw_weights.ne_warmup, axis=0), axis=0)
                 mx.eval(expert_outs, extras)
             else:
                 mx.eval(expert_outs)
@@ -449,8 +446,10 @@ class Warmer:
         self.send_conn = send_conn
 
     def warm(self) -> None:
-        y = mx.sum(mx.stack(self.raw_weights.standby_extras, axis=0), axis=0)
-        mx.eval(y)
+        mx.eval(
+            mx.sum(mx.stack(self.raw_weights.e_warmup, axis=0), axis=0),
+            mx.sum(mx.stack(self.raw_weights.ne_warmup, axis=0), axis=0),
+        )
 
     def sync_w_oths(self):
         self.send_conn.send(True)  # signals that I am ready
