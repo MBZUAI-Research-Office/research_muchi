@@ -314,6 +314,8 @@ class DistributedMoeBlock(nn.Module):
                 yt.append(expert_outs)
 
             yt = mx.stack(yt, axis=-1).sum(axis=-1)
+            if batch_size > 1:
+                mx.eval(yt)
             y.append(yt)
 
         return mx.stack(y, axis=0)
