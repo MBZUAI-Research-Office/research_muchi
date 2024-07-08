@@ -64,6 +64,17 @@ class ModelArgs:
         )
 
 
+class LruCache(OrderedDict):
+    # inspired by:
+    # https://docs.python.org/3/library/collections.html#collections.OrderedDict
+    # https://stackoverflow.com/questions/21062781/shortest-way-to-get-first-item-of-ordereddict-in-python-3
+
+    def get_lru(self) -> Any:
+        k = next(iter(self))
+        self.move_to_end(k)
+        return k
+
+
 class RawWeights:
 
     def __init__(
@@ -74,6 +85,7 @@ class RawWeights:
         out_proj: mx.array,
         experts: dict,
         lm_head: mx.array,
+        dummy_x: mx.array,
     ) -> None:
         ptrs = {i: {} for i in range(n_layers)}
         ptrs["wte"] = wte
@@ -117,20 +129,12 @@ class RawWeights:
         self.ptrs = ptrs
         self.ne_warmup = ne_warmup
         self.e_warmup = e_warmup
+        self.expert_lru = LruCache.fromkeys(experts.keys())
+        self.dummy_x = dummy_x
+        self.moe_shard_warmup_job = {e: 1 for e in experts}
 
     def __call__(self, k):
         return self.ptrs[k]
-
-
-class LruCache(OrderedDict):
-    # inspired by:
-    # https://docs.python.org/3/library/collections.html#collections.OrderedDict
-    # https://stackoverflow.com/questions/21062781/shortest-way-to-get-first-item-of-ordereddict-in-python-3
-
-    def get_lru(self) -> Any:
-        k = next(iter(self))
-        self.move_to_end(k)
-        return k
 
 
 class Attention(nn.Module):
@@ -228,13 +232,14 @@ class DistributedMoeBlock(nn.Module):
         self.e_to_g = args.ffn_config["e_to_g"]
         self.dlb_groups = args.ffn_config["dlb_groups"]
         self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
-        self.lru_cache = LruCache.fromkeys(args.ffn_config["assigned_experts"])
 
         self.n_experts_in_cluster = args.ffn_config["moe_num_experts"]
         self.num_experts_per_tok = args.ffn_config["moe_top_k"]
         self.router = Router(args.d_model, self.n_experts_in_cluster)
 
-    def allocate_jobs(self, scores: mx.array, inds: list[list[int]]) -> list[dict]:
+    def allocate_jobs(
+        self, scores: mx.array, inds: list[list[int]], expert_lru: LruCache
+    ) -> list[dict]:
         jobs = []
         max_loads = []
 
@@ -258,11 +263,11 @@ class DistributedMoeBlock(nn.Module):
 
         for i in range(len(jobs)):
             for e in jobs[i]:
-                self.lru_cache.move_to_end(e)
+                expert_lru.move_to_end(e)
 
             n_warmups = max_loads[i] - len(jobs[i])
             for _ in range(n_warmups):
-                jobs[i][self.lru_cache.get_lru()] = mx.array(0, scores.dtype)
+                jobs[i][expert_lru.get_lru()] = mx.array(0, scores.dtype)
 
             LOGS["experts_act"].append(len(jobs[i]))
 
@@ -276,6 +281,13 @@ class DistributedMoeBlock(nn.Module):
             cs.append(job[e])
 
         return (mx.stack(expert_outs, axis=-1) * mx.stack(cs, axis=0)).sum(axis=-1)
+
+    def moe_shard_warmup_calc(self, raw_weights: RawWeights) -> mx.array:
+        return self.moe_shard(
+            raw_weights.dummy_x,
+            raw_weights.moe_shard_warmup_job,
+            raw_weights(self.layer_num),
+        )
 
     def call_shard_n_all_dispatch(
         self,
@@ -339,13 +351,12 @@ class DistributedMoeBlock(nn.Module):
         scores = scores.astype(x.dtype)
         batch_size = x.shape[0]
         if batch_size > 1:
-            e_warmup_calc = mx.sum(mx.stack(raw_weights.e_warmup, axis=0), axis=0)
-            mx.eval(inds, scores, e_warmup_calc)
+            mx.eval(inds, scores, self.moe_shard_warmup_calc(raw_weights))
         else:
             mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs = self.allocate_jobs(scores, inds)
+        jobs = self.allocate_jobs(scores, inds, raw_weights.expert_lru)
 
         tic = time.perf_counter_ns()
 
@@ -396,12 +407,33 @@ class DBRX(nn.Module):
         send_conn: connection.Connection,
     ):
         super().__init__()
+        self.n_layers = args.n_layers
         self.raw_weights = raw_weights
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.resv_conn = resv_conn
         self.send_conn = send_conn
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
+
+    def sync_w_oths(self):
+        self.send_conn.send(True)  # signals that I am ready
+        self.resv_conn.recv()  # confirms that everyone else is done
+
+    def runtime_warmup_calc(self) -> tuple:
+        return (
+            self.blocks[0].ffn.moe_shard_warmup_calc(self.raw_weights),
+            mx.sum(mx.stack(self.raw_weights.ne_warmup, axis=0), axis=0),
+        )
+
+    def prewarm(self):
+        mid = self.n_layers // 2
+        rep_vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
+        for i in range(self.n_layers):
+            if i < mid:
+                mx.eval(mx.sum(mx.stack(rep_vecs, axis=0), axis=0))
+            else:
+                mx.eval(*self.runtime_warmup_calc())
+            self.sync_w_oths()
 
     def __call__(
         self,
@@ -435,35 +467,8 @@ class DBRX(nn.Module):
             )
 
         y = self.norm_f(h) @ self.raw_weights("lm_head").T
-        warmup_vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
-        mx.eval(y, mx.sum(mx.stack(warmup_vecs, axis=0), axis=0))
+        mx.eval(y, *self.runtime_warmup_calc())
         return y, cache
-
-
-class Warmer:
-    def __init__(
-        self,
-        args: ModelArgs,
-        raw_weights: RawWeights,
-        resv_conn: connection.Connection,
-        send_conn: connection.Connection,
-    ):
-        self.n_layers = args.n_layers
-        self.warmup_vecs = raw_weights.ne_warmup + raw_weights.e_warmup
-        self.resv_conn = resv_conn
-        self.send_conn = send_conn
-
-    def get_warmup_calc(self) -> mx.array:
-        return mx.sum(mx.stack(self.warmup_vecs, axis=0), axis=0)
-
-    def sync_w_oths(self):
-        self.send_conn.send(True)  # signals that I am ready
-        self.resv_conn.recv()  # confirms that everyone else is done
-
-    def __call__(self):
-        for _ in range(self.n_layers):
-            mx.eval(self.get_warmup_calc())
-            self.sync_w_oths()
 
 
 class Generator:
@@ -480,7 +485,7 @@ class Generator:
         self.model_args = self.get_model_args(config_filename)
         self.resv_conn = resv_conn
         self.send_conn = send_conn
-        self.model, self.warmer = self.load_model_and_warmer()
+        self.model = self.load_model()
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path, trust_remote_code=True
         )
@@ -505,7 +510,7 @@ class Generator:
 
         return model_args
 
-    def load_model_and_warmer(self) -> tuple[DBRX, Warmer]:
+    def load_model(self) -> DBRX:
         wqkv = mx.load(str(self.model_path / f"wqkv.safetensors"))
         out_proj = mx.load(str(self.model_path / f"out_proj.safetensors"))
         oth_non_es = mx.load(str(self.model_path / f"non-expert.safetensors"))
@@ -515,7 +520,8 @@ class Generator:
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
             for e in self.model_args.ffn_config["assigned_experts"]
         }
-        mx.eval(wqkv, out_proj, oth_non_es, experts)
+        dummy_x = mx.ones((1, self.model_args.d_model), dtype=wqkv["weights"].dtype)
+        mx.eval(wqkv, out_proj, oth_non_es, experts, dummy_x)
 
         raw_weights = RawWeights(
             self.model_args.n_layers,
@@ -524,14 +530,13 @@ class Generator:
             out_proj,
             experts,
             oth_non_es.pop("lm_head.weight"),
+            dummy_x,
         )
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
         model.load_weights(list(oth_non_es.items()))
         model.eval()
 
-        return model, Warmer(
-            self.model_args, raw_weights, self.resv_conn, self.send_conn
-        )
+        return model
 
     def generate(
         self,
@@ -556,6 +561,7 @@ class Generator:
         token_strings = []
         REPLACEMENT_CHAR = "\ufffd"
 
+        self.model.prewarm()
         tic = time.perf_counter()
 
         for n in range(max_tokens):
@@ -597,12 +603,6 @@ class Generator:
     def start(self) -> None:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             while True:
-                is_gen_run = self.resv_conn.recv()
-
-                if not is_gen_run:
-                    self.warmer()
-                    continue
-
                 prompt = self.resv_conn.recv()
                 max_tokens = self.resv_conn.recv()
                 res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
@@ -793,9 +793,11 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     continue
 
                 await self.sync_w_oths(oth_shards, before_warming=True)
+                gen = self.gen_queue[0]
+                self.send_conn.send(gen["req"].prompt)
+                self.send_conn.send(gen["req"].max_tokens)
+
                 logging.info(f"warming...")
-                # signal Generator that this is a warming run
-                self.send_conn.send(False)
 
                 for li in range(self.config["n_layers"]):
                     await self.sync_w_oths(oth_shards, li=li)
@@ -803,11 +805,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     self.send_conn.send(True)
 
                 logging.info(f"processing request...")
-                # signal Generator that this is a generate run
-                self.send_conn.send(True)
-                gen = self.gen_queue[0]
-                self.send_conn.send(gen["req"].prompt)
-                self.send_conn.send(gen["req"].max_tokens)
 
                 for _ in range(gen["req"].max_tokens):
                     batch_size = self.resv_conn.recv()
