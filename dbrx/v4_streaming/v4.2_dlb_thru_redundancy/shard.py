@@ -291,8 +291,8 @@ class DistributedMoeBlock(nn.Module):
         for bi, xt in enumerate(x):
             expert_outs = self.moe_shard(xt, jobs[bi], ws)
             if len(jobs) > 1:
-                extras = mx.sum(mx.stack(raw_weights.ne_warmup, axis=0), axis=0)
-                mx.eval(expert_outs, extras)
+                ne_warmup_calc = mx.sum(mx.stack(raw_weights.ne_warmup, axis=0), axis=0)
+                mx.eval(expert_outs, ne_warmup_calc)
             else:
                 mx.eval(expert_outs)
             y.append(expert_outs)
@@ -337,7 +337,12 @@ class DistributedMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
-        mx.eval(inds, scores, mx.sum(mx.stack(raw_weights.e_warmup, axis=0), axis=0))
+        batch_size = x.shape[0]
+        if batch_size > 1:
+            e_warmup_calc = mx.sum(mx.stack(raw_weights.e_warmup, axis=0), axis=0)
+            mx.eval(inds, scores, e_warmup_calc)
+        else:
+            mx.eval(inds, scores)
 
         inds = inds.tolist()
         jobs = self.allocate_jobs(scores, inds)
@@ -347,7 +352,7 @@ class DistributedMoeBlock(nn.Module):
         compute_fut = executor.submit(
             self.call_shard_n_all_dispatch, x, jobs, raw_weights, send_conn
         )
-        comm_fut = executor.submit(self.all_combine, x.shape[0], resv_conn)
+        comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
         concurrent.futures.wait([compute_fut, comm_fut])
 
         moe_lat = compute_fut.result()[1]
