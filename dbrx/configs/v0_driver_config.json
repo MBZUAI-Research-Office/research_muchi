@@ -1,0 +1,54 @@
+{
+  "architectures": [
+    "DbrxForCausalLM"
+  ],
+  "attn_config": {
+    "clip_qkv": 8,
+    "kv_n_heads": 8,
+    "model_type": "",
+    "rope_theta": 500000
+  },
+  "d_model": 6144,
+  "emb_pdrop": 0.0,
+  "ffn_config": {
+    "ffn_hidden_size": 10752,
+    "model_type": "",
+    "moe_jitter_eps": 0,
+    "moe_loss_weight": 0.05,
+    "moe_num_experts": 16,
+    "moe_top_k": 4,
+    "moe_shard_map": {
+      "192.168.1.5:5000": [0],
+      "192.168.1.5:5001": [1],
+      "192.168.1.5:5002": [2],
+      "192.168.1.5:5003": [3],
+      "192.168.1.5:5004": [4],
+      "192.168.1.5:5005": [5],
+      "192.168.1.5:5006": [6],
+      "192.168.1.5:5007": [7],
+      "192.168.1.6:6000": [8],
+      "192.168.1.6:6001": [9],
+      "192.168.1.6:6002": [10],
+      "192.168.1.6:6003": [11],
+      "192.168.1.6:6004": [12],
+      "192.168.1.6:6005": [13],
+      "192.168.1.6:6006": [14],
+      "192.168.1.6:6007": [15]
+    },
+    "ffn_act_fn": {
+      "name": "silu"
+    }
+  },
+  "initializer_range": 0.02,
+  "max_seq_len": 32768,
+  "model_type": "dbrx",
+  "n_heads": 48,
+  "n_layers": 40,
+  "output_router_logits": false,
+  "resid_pdrop": 0.0,
+  "tie_word_embeddings": false,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.40.0",
+  "use_cache": true,
+  "vocab_size": 100352
+}

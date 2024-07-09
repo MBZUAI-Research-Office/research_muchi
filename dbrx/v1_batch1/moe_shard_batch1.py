@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 
 import grpc
 import moe_shard_batch1_pb2
@@ -97,12 +98,15 @@ class MoeShardServicer(moe_shard_batch1_pb2_grpc.MoeShardServicer):
     async def Execute(
         self, request: moe_shard_batch1_pb2.Inputs, context: grpc.aio.ServicerContext
     ):
+        tic = time.perf_counter_ns()
         outputs = self.model(
             request.block_num,
             np.frombuffer(request.activated_experts, dtype=np.int64),
             np.frombuffer(request.data, dtype=np.float32),
         )
-        return moe_shard_batch1_pb2.Outputs(data=outputs.tobytes())
+        return moe_shard_batch1_pb2.Outputs(
+            data=outputs.tobytes(), exec_time=time.perf_counter_ns() - tic
+        )
 
     def load_model(self, config_filename: str) -> nn.Module:
         try:
