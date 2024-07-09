@@ -279,15 +279,15 @@ class DistributedMoeBlock(nn.Module):
         ws = raw_weights(self.layer_num)
         expert_outs, cs = [], []
         for e in job:
-            y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
+            y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ (
+                ws[e]["w2"] * job[e]
+            )
             expert_outs.append(y)
-            cs.append(job[e])
         if warms_ne:
             for vec in raw_weights.ne_warmup:
-                expert_outs.append(vec)
-                cs.append(mx.array(0, dtype=x.dtype))
+                expert_outs.append(vec * mx.array(0, dtype=x.dtype))
 
-        y = (mx.stack(expert_outs, axis=-1) * mx.stack(cs, axis=0)).sum(axis=-1)
+        y = mx.stack(expert_outs, axis=-1).sum(axis=-1)
         mx.eval(y)
         return y
 
