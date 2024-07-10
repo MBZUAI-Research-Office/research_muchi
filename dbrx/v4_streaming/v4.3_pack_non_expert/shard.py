@@ -136,7 +136,7 @@ class RawWeights:
         self.raw_ptrs = raw_ptrs
         self.lib_ptrs = lib_ptrs
         self.ne_warmup = ne_warmup
-        self.e_warmup = e_warmup
+        self.full_warmup = ne_warmup + e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
 
     def __call__(self, k):
@@ -411,7 +411,6 @@ class DBRX(nn.Module):
         super().__init__()
         self.n_layers = args.n_layers
         self.raw_weights = raw_weights
-        self.full_warm_vecs = raw_weights.ne_warmup + raw_weights.e_warmup
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.resv_conn = resv_conn
@@ -423,7 +422,7 @@ class DBRX(nn.Module):
         self.resv_conn.recv()  # confirms that everyone else is done
 
     def full_warm_calc(self) -> mx.array:
-        return mx.sum(mx.stack(self.full_warm_vecs, axis=0), axis=0)
+        return mx.sum(mx.stack(self.raw_weights.full_warmup, axis=0), axis=0)
 
     def prewarm(self):
         for _ in range(self.n_layers):
