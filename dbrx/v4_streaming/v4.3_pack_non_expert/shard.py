@@ -81,17 +81,20 @@ class RawWeights:
         self,
         n_layers: int,
         wte: mx.array,
-        wqkv: mx.array,
-        out_proj: mx.array,
+        wqkvs: mx.array,
+        out_projs: mx.array,
+        routers: mx.array,
         experts: dict,
         lm_head: mx.array,
         norms: list,
     ) -> None:
         ptrs = {i: {} for i in range(n_layers)}
-        for i, mat in enumerate(wqkv["weights"]):
+        for i, mat in enumerate(wqkvs):
             ptrs[i]["wqkv"] = mat
-        for i, mat in enumerate(out_proj["weights"]):
+        for i, mat in enumerate(out_projs):
             ptrs[i]["out_proj"] = mat
+        for i, mat in enumerate(routers):
+            ptrs[i]["router"] = mat
         for e, d in experts.items():
             for j, mat in enumerate(d["weights"]):
                 i = j // 3
@@ -113,6 +116,9 @@ class RawWeights:
             ne_warmup.append(vec)
             break
         for vec in ptrs[0]["out_proj"]:
+            ne_warmup.append(vec)
+            break
+        for vec in ptrs[0]["router"]:
             ne_warmup.append(vec)
             break
         for vec in ptrs["lm_head"]:
@@ -211,30 +217,18 @@ class NormAttnNorm(nn.Module):
         return x, self.norm_2(x), cache
 
 
-class Router(nn.Module):
-    def __init__(self, d_model: int, num_experts: int):
-        super().__init__()
-        self.layer = nn.Linear(d_model, num_experts, bias=False)
-
-    def __call__(self, x: mx.array):
-        return self.layer(x)
-
-
 class DistributedMoeBlock(nn.Module):
     def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
         self.act_fn = nn.silu
         self.layer_num = layer_num
         self.d_model = args.d_model
+        self.num_experts_per_tok = args.ffn_config["moe_top_k"]
 
         self.url = args.ffn_config["shard_url"]
         self.e_to_g = args.ffn_config["e_to_g"]
         self.dlb_groups = args.ffn_config["dlb_groups"]
         self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
-
-        self.n_experts_in_cluster = args.ffn_config["moe_num_experts"]
-        self.num_experts_per_tok = args.ffn_config["moe_top_k"]
-        self.router = Router(args.d_model, self.n_experts_in_cluster)
 
     def allocate_jobs(self, inds: list[list[int]], expert_lru: LruCache) -> tuple:
         jobs = []
@@ -287,17 +281,17 @@ class DistributedMoeBlock(nn.Module):
         self,
         x: mx.array,
         jobs: list[set],
-        raw_weights: RawWeights,
+        ws: dict,
+        ne_warmup_vecs: list,
         send_conn: connection.Connection,
     ):
         tic = time.perf_counter_ns()
 
-        ws = raw_weights.ptrs[self.layer_num]
         shard_outs = {}
         for bi, xt in enumerate(x):
             expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws)
             if len(jobs) > 1:
-                ne_warmup_calc = mx.sum(mx.stack(raw_weights.ne_warmup, axis=0), axis=0)
+                ne_warmup_calc = mx.sum(mx.stack(ne_warmup_vecs, axis=0), axis=0)
                 mx.eval(expert_outs, ne_warmup_calc)
             else:
                 mx.eval(expert_outs)
@@ -330,8 +324,9 @@ class DistributedMoeBlock(nn.Module):
         ne = self.num_experts_per_tok
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
         x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
+        ws = raw_weights(self.layer_num)
 
-        gates = self.router(x)
+        gates = x @ ws["router"].T
         gates = mx.softmax(gates.astype(mx.float32), axis=-1)
 
         inds = mx.stop_gradient(mx.argpartition(-gates, kth=ne, axis=-1)[:, :ne])
@@ -348,7 +343,12 @@ class DistributedMoeBlock(nn.Module):
         tic = time.perf_counter_ns()
 
         compute_fut = executor.submit(
-            self.call_shard_n_all_dispatch, x, jobs, raw_weights, send_conn
+            self.call_shard_n_all_dispatch,
+            x,
+            jobs,
+            ws,
+            raw_weights.ne_warmup,
+            send_conn,
         )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
         fut_map = {compute_fut: "moe", comm_fut: "comm"}
@@ -500,28 +500,27 @@ class Generator:
         return model_args
 
     def load_model(self) -> DBRX:
-        wqkv = mx.load(str(self.model_path / f"wqkv.safetensors"))
-        out_proj = mx.load(str(self.model_path / f"out_proj.safetensors"))
-        oth_non_es = mx.load(str(self.model_path / f"non-expert.safetensors"))
+        non_experts = mx.load(str(self.model_path / f"non-expert.safetensors"))
         # sample:
         # {0: {"weights": mx.array([0, 1, 2, 3])}}
         experts = {
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
             for e in self.model_args.ffn_config["assigned_experts"]
         }
-        mx.eval(wqkv, out_proj, oth_non_es, experts)
+        mx.eval(non_experts, experts)
 
         raw_weights = RawWeights(
             self.model_args.n_layers,
-            oth_non_es["wte.weight"],  # lookup table
-            wqkv,
-            out_proj,
+            non_experts["wte.weight"],  # lookup table
+            non_experts.pop("wqkv_weights"),
+            non_experts.pop("out_proj_weights"),
+            non_experts.pop("router_weights"),
             experts,
-            oth_non_es.pop("lm_head.weight"),
-            [v for k, v in oth_non_es.items() if "norm" in k],
+            non_experts.pop("lm_head.weight"),
+            [v for k, v in non_experts.items() if "norm" in k],
         )
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
-        model.load_weights(list(oth_non_es.items()))
+        model.load_weights(list(non_experts.items()))
         model.eval()
 
         return model
