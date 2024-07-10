@@ -85,9 +85,9 @@ class RawWeights:
         out_proj: mx.array,
         experts: dict,
         lm_head: mx.array,
+        norms: list,
     ) -> None:
         ptrs = {i: {} for i in range(n_layers)}
-        ptrs["wte"] = wte
         for i, mat in enumerate(wqkv["weights"]):
             ptrs[i]["wqkv"] = mat
         for i, mat in enumerate(out_proj["weights"]):
@@ -106,7 +106,7 @@ class RawWeights:
         ptrs["lm_head"] = lm_head
 
         ne_warmup = []
-        for vec in ptrs["wte"]:
+        for vec in wte:
             ne_warmup.append(vec)
             break
         for vec in ptrs[0]["wqkv"]:
@@ -118,6 +118,8 @@ class RawWeights:
         for vec in ptrs["lm_head"]:
             ne_warmup.append(vec)
             break
+        for vec in norms:
+            ne_warmup.append(vec)
 
         e_warmup = []
         for e in experts:
@@ -516,6 +518,7 @@ class Generator:
             out_proj,
             experts,
             oth_non_es.pop("lm_head.weight"),
+            [k for k in oth_non_es if "norm" in k],
         )
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
         model.load_weights(list(oth_non_es.items()))
