@@ -518,7 +518,7 @@ class Generator:
             out_proj,
             experts,
             oth_non_es.pop("lm_head.weight"),
-            [k for k in oth_non_es if "norm" in k],
+            [v for k, v in oth_non_es.items() if "norm" in k],
         )
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
         model.load_weights(list(oth_non_es.items()))
