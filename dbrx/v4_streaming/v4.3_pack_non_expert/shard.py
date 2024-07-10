@@ -138,6 +138,8 @@ class RawWeights:
         self.ne_warmup = ne_warmup
         self.e_warmup = e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
+        self.dummy_x = mx.ones((1, 1, e_warmup[0].shape[0]), dtype=e_warmup[0].dtype)
+        mx.eval(self.dummy_x)
 
     def __call__(self, k):
         return self.raw_ptrs[k]
@@ -321,7 +323,8 @@ class DistributedMoeBlock(nn.Module):
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
         executor: concurrent.futures.ThreadPoolExecutor,
-    ) -> mx.array:
+        dry: bool,
+    ):
         ne = self.num_experts_per_tok
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
         x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
@@ -334,8 +337,16 @@ class DistributedMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
-        mx.eval(inds, scores)
 
+        if dry:
+            for xt in x:
+                return (
+                    inds,
+                    scores,
+                    self.moe_shard(xt, {raw_weights.expert_lru.get_lru()}, ws)[0],
+                )
+
+        mx.eval(inds, scores)
         inds = inds.tolist()
         jobs, job_map = self.allocate_jobs(inds, raw_weights.expert_lru)
         batch_size = x.shape[0]
@@ -394,10 +405,13 @@ class DecoderLayer(nn.Module):
         executor: concurrent.futures.ThreadPoolExecutor,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
-    ) -> mx.array:
+        dry: bool = False,
+    ):
         r, h, cache = self.norm_attn_norm(x, raw_weights, mask, cache)
-        out = self.ffn(h, raw_weights, resv_conn, send_conn, executor) + r
-        return out, cache
+        out = self.ffn(h, raw_weights, resv_conn, send_conn, executor, dry)
+        if dry:
+            return out[0], out[1], out[2] + r
+        return out + r, cache
 
 
 class DBRX(nn.Module):
@@ -427,6 +441,16 @@ class DBRX(nn.Module):
             mx.eval(mx.sum(mx.stack(vecs, axis=0), axis=0))
             self.sync_w_oths()
 
+    def dry_run(self, executor: concurrent.futures.ThreadPoolExecutor):
+        return self.blocks[0](
+            self.raw_weights.dummy_x,
+            self.raw_weights,
+            self.resv_conn,
+            self.send_conn,
+            executor,
+            dry=True,
+        )
+
     def __call__(
         self,
         inputs: mx.array,
@@ -445,7 +469,8 @@ class DBRX(nn.Module):
             cache = [None] * len(self.blocks)
 
         # h.shape = (sample_size, sequence_length, d_model)
-        self.send_conn.send(h.shape[0] * T)
+        batch_size = h.shape[0] * T
+        self.send_conn.send(batch_size)
 
         for e, layer in enumerate(self.blocks):
             h, cache[e] = layer(
@@ -458,7 +483,10 @@ class DBRX(nn.Module):
                 cache[e],
             )
 
-        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
+        outputs = self.norm_f(h) @ self.raw_weights("lm_head").T
+        if batch_size > 1:
+            mx.eval(outputs, *self.dry_run())
+        return outputs, cache
 
 
 class Generator:
