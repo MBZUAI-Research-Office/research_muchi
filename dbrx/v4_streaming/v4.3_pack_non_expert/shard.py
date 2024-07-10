@@ -77,69 +77,70 @@ class LruCache(OrderedDict):
 
 class RawWeights:
 
-    def __init__(
-        self,
-        n_layers: int,
-        wte: mx.array,
-        wqkvs: mx.array,
-        out_projs: mx.array,
-        routers: mx.array,
-        experts: dict,
-        lm_head: mx.array,
-        norms: list,
-    ) -> None:
-        ptrs = {i: {} for i in range(n_layers)}
-        for i, mat in enumerate(wqkvs):
-            ptrs[i]["wqkv"] = mat
-        for i, mat in enumerate(out_projs):
-            ptrs[i]["out_proj"] = mat
-        for i, mat in enumerate(routers):
-            ptrs[i]["router"] = mat
+    def __init__(self, n_layers: int, experts: dict, non_experts: dict) -> None:
+        raw_ptrs = {i: {} for i in range(n_layers)}
+        lib_ptrs = {}
+        for i, mat in enumerate(non_experts["wqkv_weights"]):
+            raw_ptrs[i]["wqkv"] = mat
+        for i, mat in enumerate(non_experts["out_proj_weights"]):
+            raw_ptrs[i]["out_proj"] = mat
+        for i, mat in enumerate(non_experts["router_weights"]):
+            raw_ptrs[i]["router"] = mat
+        for j, vec in enumerate(non_experts["norm_weights"]):
+            if j == non_experts["norm_weights"].shape[0] - 1:
+                lib_ptrs["norm_f.weight"] = vec
+                continue
+            i = j // 2
+            if j % 2 == 0:
+                lib_ptrs[f"blocks.{i}.norm_attn_norm.norm_1.weight"] = vec
+            elif j % 2 == 1:
+                lib_ptrs[f"blocks.{i}.norm_attn_norm.norm_2.weight"] = vec
+        for i, mat in enumerate(non_experts["vocab_weights"]):
+            if i == 0:
+                lib_ptrs["wte.weight"] = mat
+            elif i == 1:
+                raw_ptrs["lm_head"] = mat
         for e, d in experts.items():
             for j, mat in enumerate(d["weights"]):
                 i = j // 3
-                if e not in ptrs[i]:
-                    ptrs[i][e] = {}
+                if e not in raw_ptrs[i]:
+                    raw_ptrs[i][e] = {}
                 if j % 3 == 0:
-                    ptrs[i][e]["v1"] = mat
+                    raw_ptrs[i][e]["v1"] = mat
                 elif j % 3 == 1:
-                    ptrs[i][e]["w1"] = mat
+                    raw_ptrs[i][e]["w1"] = mat
                 else:
-                    ptrs[i][e]["w2"] = mat
-        ptrs["lm_head"] = lm_head
+                    raw_ptrs[i][e]["w2"] = mat
 
         ne_warmup = []
-        for vec in wte:
+        for vec in raw_ptrs[0]["wqkv"]:
             ne_warmup.append(vec)
             break
-        for vec in ptrs[0]["wqkv"]:
+        for vec in raw_ptrs[0]["out_proj"]:
             ne_warmup.append(vec)
             break
-        for vec in ptrs[0]["out_proj"]:
+        for vec in raw_ptrs[0]["router"]:
             ne_warmup.append(vec)
             break
-        for vec in ptrs[0]["router"]:
+        for vec in lib_ptrs["wte.weight"]:
             ne_warmup.append(vec)
             break
-        for vec in ptrs["lm_head"]:
-            ne_warmup.append(vec)
-            break
-        for vec in norms:
-            ne_warmup.append(vec)
+        ne_warmup.append(lib_ptrs["blocks.0.norm_attn_norm.norm_1.weight"])
 
         e_warmup = []
         for e in experts:
-            for vec in ptrs[0][e]["v1"]:
+            for vec in raw_ptrs[0][e]["v1"]:
                 e_warmup.append(vec)
                 break
 
-        self.ptrs = ptrs
+        self.raw_ptrs = raw_ptrs
+        self.lib_ptrs = lib_ptrs
         self.ne_warmup = ne_warmup
         self.e_warmup = e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
 
     def __call__(self, k):
-        return self.ptrs[k]
+        return self.raw_ptrs[k]
 
 
 class Attention(nn.Module):
@@ -509,18 +510,9 @@ class Generator:
         }
         mx.eval(non_experts, experts)
 
-        raw_weights = RawWeights(
-            self.model_args.n_layers,
-            non_experts["wte.weight"],  # lookup table
-            non_experts.pop("wqkv_weights"),
-            non_experts.pop("out_proj_weights"),
-            non_experts.pop("router_weights"),
-            experts,
-            non_experts.pop("lm_head.weight"),
-            [v for k, v in non_experts.items() if "norm" in k],
-        )
+        raw_weights = RawWeights(self.model_args.n_layers, experts, non_experts)
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
-        model.load_weights(list(non_experts.items()))
+        model.load_weights(list(raw_weights.lib_ptrs.items()))
         model.eval()
 
         return model

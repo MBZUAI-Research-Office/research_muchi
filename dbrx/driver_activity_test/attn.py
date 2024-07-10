@@ -37,30 +37,51 @@ class ModelArgs:
 
 class RawWeights:
 
-    def __init__(
-        self, n_layers: int, wqkv: mx.array, out_proj: mx.array, oth_non_es: dict
-    ) -> None:
-        ptrs = {i: {} for i in range(n_layers)}
-        for i, mat in enumerate(wqkv["weights"]):
-            ptrs[i]["wqkv"] = mat
-        for i, mat in enumerate(out_proj["weights"]):
-            ptrs[i]["out_proj"] = mat
+    def __init__(self, n_layers: int, non_experts: dict) -> None:
+        raw_ptrs = {i: {} for i in range(n_layers)}
+        lib_ptrs = {}
+        for i, mat in enumerate(non_experts["wqkv_weights"]):
+            raw_ptrs[i]["wqkv"] = mat
+        for i, mat in enumerate(non_experts["out_proj_weights"]):
+            raw_ptrs[i]["out_proj"] = mat
+        for i, mat in enumerate(non_experts["router_weights"]):
+            raw_ptrs[i]["router"] = mat
+        for j, vec in enumerate(non_experts["norm_weights"]):
+            if j == non_experts["norm_weights"].shape[0] - 1:
+                lib_ptrs["norm_f.weight"] = vec
+                continue
+            i = j // 2
+            if j % 2 == 0:
+                lib_ptrs[f"blocks.{i}.norm_attn_norm.norm_1.weight"] = vec
+            elif j % 2 == 1:
+                lib_ptrs[f"blocks.{i}.norm_attn_norm.norm_2.weight"] = vec
+        for i, mat in enumerate(non_experts["vocab_weights"]):
+            if i == 0:
+                lib_ptrs["wte.weight"] = mat
+            elif i == 1:
+                raw_ptrs["lm_head"] = mat
 
         ne_warmup = []
-        for vec in ptrs[0]["wqkv"]:
+        for vec in raw_ptrs[0]["wqkv"]:
             ne_warmup.append(vec)
             break
-        for vec in ptrs[0]["out_proj"]:
+        for vec in raw_ptrs[0]["out_proj"]:
             ne_warmup.append(vec)
             break
-        for vec in oth_non_es.values():
+        for vec in raw_ptrs[0]["router"]:
             ne_warmup.append(vec)
+            break
+        for vec in lib_ptrs["wte.weight"]:
+            ne_warmup.append(vec)
+            break
+        ne_warmup.append(lib_ptrs["blocks.0.norm_attn_norm.norm_1.weight"])
 
-        self.ptrs = ptrs
+        self.raw_ptrs = raw_ptrs
+        self.lib_ptrs = lib_ptrs
         self.ne_warmup = ne_warmup
 
     def __call__(self, k):
-        return self.ptrs[k]
+        return self.raw_ptrs[k]
 
 
 class Attention(nn.Module):
@@ -137,21 +158,11 @@ class NormAttnNorm(nn.Module):
         x = h + x
         return x, self.norm_2(x), cache
 
-    # def __call__(
-    #     self,
-    #     x: mx.array,
-    #     raw_weights: RawWeights,
-    #     mask: Optional[mx.array] = None,
-    #     cache: Optional[Tuple[mx.array, mx.array]] = None,
-    # ) -> mx.array:
-    #     h, cache = self.attn(x, raw_weights, mask=mask, cache=cache)
-    #     x = h + x
-    #     return x, x, cache
-
 
 class DecoderLayer(nn.Module):
     def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
+        self.layer_num = layer_num
         self.norm_attn_norm = NormAttnNorm(args, layer_num)
 
     def __call__(
@@ -162,9 +173,21 @@ class DecoderLayer(nn.Module):
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
         r, h, cache = self.norm_attn_norm(x, raw_weights, mask, cache)
-        y = h + r
-        mx.eval(y)
-        return y, cache
+
+        orig_shape = h.shape  # (sample_size, sequence_length, d_model)
+        h = h.reshape(-1, h.shape[-1])  # (sample_size * sequence_length, d_model)
+        ws = raw_weights(self.layer_num)
+
+        gates = h @ ws["router"].T
+        gates = mx.softmax(gates.astype(mx.float32), axis=-1)
+
+        inds = mx.stop_gradient(mx.argpartition(-gates, kth=4, axis=-1)[:, :4])
+        scores = mx.take_along_axis(gates, inds, axis=-1)
+        scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
+        scores = scores.astype(h.dtype)
+        mx.eval(inds, scores)
+
+        return h + r, cache
 
 
 class DBRX(nn.Module):
@@ -172,6 +195,7 @@ class DBRX(nn.Module):
         super().__init__()
         self.n_layers = args.n_layers
         self.raw_weights = raw_weights
+        self.wte = nn.Embedding(args.vocab_size, args.d_model)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
 
@@ -188,7 +212,7 @@ class DBRX(nn.Module):
         )
 
     def __call__(self, inputs: mx.array, cache=None):
-        h = inputs
+        h = self.wte(inputs)
 
         mask = None
         T = h.shape[1]
@@ -201,6 +225,8 @@ class DBRX(nn.Module):
 
         for e, layer in enumerate(self.blocks):
             h, cache[e] = layer(h, self.raw_weights, mask, cache[e])
+
+        mx.eval(self.norm_f(h) @ self.raw_weights("lm_head").T)
 
 
 class Test:
@@ -222,37 +248,23 @@ class Test:
         return ModelArgs.from_dict(config)
 
     def load_model(self) -> DBRX:
-        wqkv = mx.load(str(self.model_path / f"wqkv.safetensors"))
-        out_proj = mx.load(str(self.model_path / f"out_proj.safetensors"))
-        oth_non_es = mx.load(str(self.model_path / f"non-expert.safetensors"))
-        mx.eval(wqkv, out_proj, oth_non_es)
+        non_experts = mx.load(str(self.model_path / f"non-expert.safetensors"))
+        mx.eval(non_experts)
 
-        for k in list(oth_non_es.keys()):
-            if "router" in k:
-                del oth_non_es[k]
-
-        # raw_weights = RawWeights(
-        #     self.model_args.n_layers,
-        #     oth_non_es["wte.weight"],
-        #     wqkv,
-        #     out_proj,
-        #     oth_non_es.pop("lm_head.weight"),
-        # )
-        del oth_non_es["wte.weight"]
-        del oth_non_es["lm_head.weight"]
-        raw_weights = RawWeights(self.model_args.n_layers, wqkv, out_proj, oth_non_es)
+        raw_weights = RawWeights(self.model_args.n_layers, non_experts)
         model = DBRX(self.model_args, raw_weights)
-        model.load_weights(list(oth_non_es.items()))
+        model.load_weights(list(raw_weights.lib_ptrs.items()))
         model.eval()
 
         return model
 
     def start(self):
         # shows that not warming norm_1 & norm_2 causes driver processing
-        x = mx.ones((1, 1, 6144), dtype=mx.bfloat16)
+        x = mx.array([[1]], dtype=mx.int32)
         mx.eval(x)
         self.model.prewarm()
-        self.model(x)
+        for _ in range(3):
+            self.model(x)
 
 
 if __name__ == "__main__":
