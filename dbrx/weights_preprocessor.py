@@ -159,26 +159,29 @@ class WeightsPreprocessor:
 
     def batch_non_experts(self, num_layers: int) -> None:
         ne_weights = {}
-        wqkvs, out_projs, routers = [], [], []
+        wqkvs, out_projs, norms, routers = [], [], [], []
         sep_paths = []
         for i in range(num_layers):
             path = self.input_path / f"block{i}-attention-and-router.safetensors"
             sep_paths.append(path)
             weights = safetensors.torch.load_file(path)
-            wqkvs.append(weights.pop(f"blocks.{i}.norm_attn_norm.attn.Wqkv.weight"))
-            out_projs.append(
-                weights.pop(f"blocks.{i}.norm_attn_norm.attn.out_proj.weight")
-            )
-            routers.append(weights.pop(f"blocks.{i}.ffn.router.layer.weight"))
-            ne_weights.update(weights)  # norm_1 & norm_2
+            wqkvs.append(weights[f"blocks.{i}.norm_attn_norm.attn.Wqkv.weight"])
+            out_projs.append(weights[f"blocks.{i}.norm_attn_norm.attn.out_proj.weight"])
+            norms.append(weights[f"blocks.{i}.norm_attn_norm.norm_1.weight"])
+            norms.append(weights[f"blocks.{i}.norm_attn_norm.norm_2.weight"])
+            routers.append(weights[f"blocks.{i}.ffn.router.layer.weight"])
 
         non_layer_path = self.input_path / f"non-layer.safetensors"
-        ne_weights.update(safetensors.torch.load_file(non_layer_path))
+        non_layer = safetensors.torch.load_file(non_layer_path)
+        norms.append(non_layer["norm_f.weight"])
+        vocabs = [non_layer["wte.weight"], non_layer["lm_head.weight"]]
         sep_paths.append(non_layer_path)
 
         ne_weights["wqkv_weights"] = torch.stack(wqkvs, dim=0)
         ne_weights["out_proj_weights"] = torch.stack(out_projs, dim=0)
+        ne_weights["norm_weights"] = torch.stack(norms, dim=0)
         ne_weights["router_weights"] = torch.stack(routers, dim=0)
+        ne_weights["vocab_weights"] = torch.stack(vocabs, dim=0)
 
         safetensors.torch.save_file(
             ne_weights, self.output_path / f"non-expert.safetensors"
