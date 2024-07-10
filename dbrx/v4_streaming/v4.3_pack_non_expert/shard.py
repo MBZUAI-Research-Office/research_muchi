@@ -411,6 +411,7 @@ class DBRX(nn.Module):
         super().__init__()
         self.n_layers = args.n_layers
         self.raw_weights = raw_weights
+        self.full_warm_vecs = raw_weights.ne_warmup + raw_weights.e_warmup
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.resv_conn = resv_conn
@@ -421,10 +422,12 @@ class DBRX(nn.Module):
         self.send_conn.send(True)  # signals that I am ready
         self.resv_conn.recv()  # confirms that everyone else is done
 
+    def full_warm_calc(self) -> mx.array:
+        return mx.sum(mx.stack(self.full_warm_vecs, axis=0), axis=0)
+
     def prewarm(self):
-        vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
         for _ in range(self.n_layers):
-            mx.eval(mx.sum(mx.stack(vecs, axis=0), axis=0))
+            mx.eval(self.full_warm_calc())
             self.sync_w_oths()
 
     def __call__(
@@ -445,7 +448,8 @@ class DBRX(nn.Module):
             cache = [None] * len(self.blocks)
 
         # h.shape = (sample_size, sequence_length, d_model)
-        self.send_conn.send(h.shape[0] * T)
+        batch_size = h.shape[0] * T
+        self.send_conn.send(batch_size)
 
         for e, layer in enumerate(self.blocks):
             h, cache[e] = layer(
@@ -458,7 +462,10 @@ class DBRX(nn.Module):
                 cache[e],
             )
 
-        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
+        y = self.norm_f(h) @ self.raw_weights("lm_head").T
+        if batch_size > 1:
+            mx.eval(y, self.full_warm_calc())
+        return y, cache
 
 
 class Generator:
