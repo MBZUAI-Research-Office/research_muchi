@@ -136,7 +136,7 @@ class RawWeights:
         self.raw_ptrs = raw_ptrs
         self.lib_ptrs = lib_ptrs
         self.ne_warmup = ne_warmup
-        self.full_warmup = ne_warmup + e_warmup
+        self.e_warmup = e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
 
     def __call__(self, k):
@@ -421,12 +421,10 @@ class DBRX(nn.Module):
         self.send_conn.send(True)  # signals that I am ready
         self.resv_conn.recv()  # confirms that everyone else is done
 
-    def full_warm_calc(self) -> mx.array:
-        return mx.sum(mx.stack(self.raw_weights.full_warmup, axis=0), axis=0)
-
     def prewarm(self):
+        vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
         for _ in range(self.n_layers):
-            mx.eval(self.full_warm_calc())
+            mx.eval(mx.sum(mx.stack(vecs, axis=0), axis=0))
             self.sync_w_oths()
 
     def __call__(
@@ -447,8 +445,7 @@ class DBRX(nn.Module):
             cache = [None] * len(self.blocks)
 
         # h.shape = (sample_size, sequence_length, d_model)
-        batch_size = h.shape[0] * T
-        self.send_conn.send(batch_size)
+        self.send_conn.send(h.shape[0] * T)
 
         for e, layer in enumerate(self.blocks):
             h, cache[e] = layer(
@@ -461,10 +458,7 @@ class DBRX(nn.Module):
                 cache[e],
             )
 
-        y = self.norm_f(h) @ self.raw_weights("lm_head").T
-        if batch_size > 1:
-            mx.eval(y, self.full_warm_calc())
-        return y, cache
+        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
 
 
 class Generator:
