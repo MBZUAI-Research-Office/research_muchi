@@ -158,36 +158,30 @@ class WeightsPreprocessor:
         self.clean_if_told(sep_paths)
 
     def batch_non_experts(self, num_layers: int) -> None:
-        insig_weights = {}
-        wqkv_weights = []
-        out_proj_weights = []
+        ne_weights = {}
+        wqkvs, out_projs, routers = [], [], []
         sep_paths = []
         for i in range(num_layers):
             path = self.input_path / f"block{i}-attention-and-router.safetensors"
             sep_paths.append(path)
             weights = safetensors.torch.load_file(path)
-            wqkv_weights.append(
-                weights.pop(f"blocks.{i}.norm_attn_norm.attn.Wqkv.weight")
-            )
-            out_proj_weights.append(
+            wqkvs.append(weights.pop(f"blocks.{i}.norm_attn_norm.attn.Wqkv.weight"))
+            out_projs.append(
                 weights.pop(f"blocks.{i}.norm_attn_norm.attn.out_proj.weight")
             )
-            insig_weights.update(weights)
+            routers.append(weights.pop(f"blocks.{i}.ffn.router.layer.weight"))
+            ne_weights.update(weights)  # norm_1 & norm_2
 
         non_layer_path = self.input_path / f"non-layer.safetensors"
-        insig_weights.update(safetensors.torch.load_file(non_layer_path))
+        ne_weights.update(safetensors.torch.load_file(non_layer_path))
         sep_paths.append(non_layer_path)
 
+        ne_weights["wqkv_weights"] = torch.stack(wqkvs, dim=0)
+        ne_weights["out_proj_weights"] = torch.stack(out_projs, dim=0)
+        ne_weights["router_weights"] = torch.stack(routers, dim=0)
+
         safetensors.torch.save_file(
-            insig_weights, self.output_path / f"non-expert.safetensors"
-        )
-        safetensors.torch.save_file(
-            {"weights": torch.stack(wqkv_weights, dim=0)},
-            self.output_path / f"wqkv.safetensors",
-        )
-        safetensors.torch.save_file(
-            {"weights": torch.stack(out_proj_weights, dim=0)},
-            self.output_path / f"out_proj.safetensors",
+            ne_weights, self.output_path / f"non-expert.safetensors"
         )
 
         print(f"batched non-expert weights")
