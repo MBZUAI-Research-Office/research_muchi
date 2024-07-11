@@ -339,28 +339,38 @@ class DistributedMoeBlock(nn.Module):
         inds = inds.tolist()
         jobs, job_map = self.allocate_jobs(inds, raw_weights.expert_lru)
         batch_size = x.shape[0]
-        shard_outs = {}
+        # shard_outs = {}
 
         tic = time.perf_counter_ns()
 
-        compute_fut = executor.submit(
-            self.call_shard_n_all_dispatch,
-            x,
-            jobs,
-            ws,
-            raw_weights.ne_warmup,
-            send_conn,
-        )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
-        fut_map = {compute_fut: "moe", comm_fut: "comm"}
-        for fut in concurrent.futures.as_completed(fut_map):
-            if fut_map[fut] == "moe":
-                shard_outs.update(fut.result()[0])
-                LOGS["moe_lat"].append(fut.result()[1])
-            else:
-                shard_outs.update(fut.result())
+        shard_outs, moe_lat = self.call_shard_n_all_dispatch(
+            x, jobs, ws, raw_weights.ne_warmup, send_conn
+        )
+        concurrent.futures.wait(comm_fut)
+        shard_outs.update(comm_fut.result())
 
-        LOGS["comm_lat"].append(time.perf_counter_ns() - tic - LOGS["moe_lat"][-1])
+        LOGS["moe_lat"].append(moe_lat)
+        LOGS["comm_lat"].append(time.perf_counter_ns() - tic - moe_lat)
+
+        # compute_fut = executor.submit(
+        #     self.call_shard_n_all_dispatch,
+        #     x,
+        #     jobs,
+        #     ws,
+        #     raw_weights.ne_warmup,
+        #     send_conn,
+        # )
+        # comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
+        # fut_map = {compute_fut: "moe", comm_fut: "comm"}
+        # for fut in concurrent.futures.as_completed(fut_map):
+        #     if fut_map[fut] == "moe":
+        #         shard_outs.update(fut.result()[0])
+        #         LOGS["moe_lat"].append(fut.result()[1])
+        #     else:
+        #         shard_outs.update(fut.result())
+
+        # LOGS["comm_lat"].append(time.perf_counter_ns() - tic - LOGS["moe_lat"][-1])
 
         y = []
 
