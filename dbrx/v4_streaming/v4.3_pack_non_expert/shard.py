@@ -347,7 +347,6 @@ class DistributedMoeBlock(nn.Module):
         shard_outs, moe_lat = self.call_shard_n_all_dispatch(
             x, jobs, ws, raw_weights.ne_warmup, send_conn
         )
-        concurrent.futures.wait(comm_fut)
         shard_outs.update(comm_fut.result())
 
         LOGS["moe_lat"].append(moe_lat)
