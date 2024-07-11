@@ -485,7 +485,7 @@ class DBRX(nn.Module):
 
         outputs = self.norm_f(h) @ self.raw_weights("lm_head").T
         if batch_size > 1:
-            mx.eval(outputs, *self.dry_run())
+            mx.eval(outputs, *self.dry_run(executor))
         return outputs, cache
 
 
