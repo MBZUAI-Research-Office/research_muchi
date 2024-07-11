@@ -136,10 +136,8 @@ class RawWeights:
         self.raw_ptrs = raw_ptrs
         self.lib_ptrs = lib_ptrs
         self.ne_warmup = ne_warmup
-        self.e_warmup = e_warmup
+        self.full_warmup = ne_warmup + e_warmup
         self.expert_lru = LruCache.fromkeys(experts.keys())
-        self.dummy_x = mx.ones((1, 1, e_warmup[0].shape[0]), dtype=e_warmup[0].dtype)
-        mx.eval(self.dummy_x)
 
     def __call__(self, k):
         return self.raw_ptrs[k]
@@ -323,8 +321,7 @@ class DistributedMoeBlock(nn.Module):
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
         executor: concurrent.futures.ThreadPoolExecutor,
-        dry: bool,
-    ):
+    ) -> mx.array:
         ne = self.num_experts_per_tok
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
         x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
@@ -337,16 +334,8 @@ class DistributedMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
-
-        if dry:
-            for xt in x:
-                return (
-                    inds,
-                    scores,
-                    self.moe_shard(xt, {raw_weights.expert_lru.get_lru()}, ws)[0],
-                )
-
         mx.eval(inds, scores)
+
         inds = inds.tolist()
         jobs, job_map = self.allocate_jobs(inds, raw_weights.expert_lru)
         batch_size = x.shape[0]
@@ -405,13 +394,10 @@ class DecoderLayer(nn.Module):
         executor: concurrent.futures.ThreadPoolExecutor,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
-        dry: bool = False,
     ):
         r, h, cache = self.norm_attn_norm(x, raw_weights, mask, cache)
-        out = self.ffn(h, raw_weights, resv_conn, send_conn, executor, dry)
-        if dry:
-            return out[0], out[1], out[2] + r
-        return out + r, cache
+        out = self.ffn(h, raw_weights, resv_conn, send_conn, executor) + r
+        return out, cache
 
 
 class DBRX(nn.Module):
@@ -435,21 +421,13 @@ class DBRX(nn.Module):
         self.send_conn.send(True)  # signals that I am ready
         self.resv_conn.recv()  # confirms that everyone else is done
 
-    def prewarm(self):
-        vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
-        for _ in range(self.n_layers):
-            mx.eval(mx.sum(mx.stack(vecs, axis=0), axis=0))
-            self.sync_w_oths()
+    def full_warm_calc(self) -> mx.array:
+        return mx.sum(mx.stack(self.raw_weights.full_warmup, axis=0), axis=0)
 
-    def dry_run(self, executor: concurrent.futures.ThreadPoolExecutor):
-        return self.blocks[0](
-            self.raw_weights.dummy_x,
-            self.raw_weights,
-            self.resv_conn,
-            self.send_conn,
-            executor,
-            dry=True,
-        )
+    def prewarm(self):
+        for _ in range(self.n_layers):
+            mx.eval(self.full_warm_calc())
+            self.sync_w_oths()
 
     def __call__(
         self,
@@ -483,10 +461,9 @@ class DBRX(nn.Module):
                 cache[e],
             )
 
-        outputs = self.norm_f(h) @ self.raw_weights("lm_head").T
         if batch_size > 1:
-            mx.eval(outputs, *self.dry_run(executor))
-        return outputs, cache
+            h += self.full_warm_calc() * 0
+        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
 
 
 class Generator:
