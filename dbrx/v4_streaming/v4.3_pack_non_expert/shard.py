@@ -433,14 +433,33 @@ class DBRX(nn.Module):
     def full_warm_calc(self) -> mx.array:
         return mx.sum(mx.stack(self.raw_weights.full_warmup, axis=0), axis=0)
 
-    def prewarm(self):
-        for _ in range(self.n_layers):
-            mx.eval(self.full_warm_calc())
-            self.sync_w_oths()
+    def out_transform(self, x: mx.array, temp: float) -> mx.array:
+        logits = self.norm_f(x) @ self.raw_weights("lm_head").T
+        logits = logits[:, -1, :]
+        if temp == 0:
+            return mx.argmax(logits, axis=-1)
+        return mx.random.categorical(logits * (1 / temp))
+
+    def prewarm(
+        self, dummy_in: mx.array, executor: concurrent.futures.ThreadPoolExecutor
+    ):
+        mid = self.n_layers // 2
+        for li in range(self.n_layers):
+            if li < mid:
+                mx.eval(self.full_warm_calc())
+                self.sync_w_oths()
+            else:
+                # dry model run
+                x = self.wte(dummy_in)
+                y = self.blocks[li](
+                    x, self.raw_weights, self.resv_conn, self.send_conn, executor
+                )[0]
+                mx.eval(self.out_transform(y, DEFAULT_TEMP))
 
     def __call__(
         self,
         inputs: mx.array,
+        temp: float,
         executor: concurrent.futures.ThreadPoolExecutor,
         cache=None,
     ):
@@ -472,7 +491,7 @@ class DBRX(nn.Module):
 
         if batch_size > 1:
             h += self.full_warm_calc() * 0
-        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
+        return self.out_transform(h, temp), cache
 
 
 class Generator:
@@ -538,15 +557,6 @@ class Generator:
         temp: float,
         executor: concurrent.futures.ThreadPoolExecutor,
     ):
-
-        def sample(logits: mx.array) -> Tuple[mx.array, float]:
-            if temp == 0:
-                token = mx.argmax(logits, axis=-1)
-            else:
-                token = mx.random.categorical(logits * (1 / temp))
-
-            return token
-
         prompt_tokens = mx.array(self.tokenizer.encode(prompt))
         y = prompt_tokens
         cache = None
@@ -554,13 +564,11 @@ class Generator:
         token_strings = []
         REPLACEMENT_CHAR = "\ufffd"
 
-        self.model.prewarm()
+        self.model.prewarm(mx.array(self.tokenizer.encode("hello"))[None])
         tic = time.perf_counter()
 
         for n in range(max_tokens):
-            logits, cache = self.model(y[None], executor, cache=cache)
-            logits = logits[:, -1, :]
-            y = sample(logits)
+            y, cache = self.model(y[None], temp, executor, cache=cache)
 
             token = y.item()  # get word ID
             if n == 0:
@@ -793,10 +801,15 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 logging.info(f"warming...")
 
+                mid = self.config["n_layers"] // 2
                 for li in range(self.config["n_layers"]):
-                    await self.sync_w_oths(oth_shards, li=li)
-                    # signals warmer that this layer is done
-                    self.send_conn.send(True)
+                    if li < mid:
+                        await self.sync_w_oths(oth_shards, li=li)
+                        # signals warmer that this layer is done
+                        self.send_conn.send(True)
+                    else:
+                        await self.all_dispatch_n_combine(li, 0, oth_shards)
+                        self.buffer.reset(li)
 
                 logging.info(f"processing request...")
 

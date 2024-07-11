@@ -16,8 +16,10 @@ class Test:
         )
 
     def test(self, prompts: list[str]):
-        print(self.tokenizer(prompts))
+        print(mx.array(self.tokenizer.encode(prompts))[None])
+        # print(self.tokenizer(prompts))
 
 if __name__ == "__main__":
     test = Test("/Users/xiangruike/dbrx-instruct/distributable/batch2")
-    test.test(["hello there", "how are you?"])
+    test.test("hello")
+    # test.test(["hello there", "how are you?"])
