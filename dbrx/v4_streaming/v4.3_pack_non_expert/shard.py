@@ -559,7 +559,7 @@ class Generator:
         token_strings = []
         REPLACEMENT_CHAR = "\ufffd"
 
-        self.model.prewarm(mx.array(self.tokenizer.encode("hello"))[None], executor)
+        self.model.prewarm()
         tic = time.perf_counter()
 
         for n in range(max_tokens):
