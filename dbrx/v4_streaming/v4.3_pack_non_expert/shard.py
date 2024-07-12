@@ -500,10 +500,10 @@ class Generator:
         self.model_args = self.get_model_args(config_filename)
         self.resv_conn = resv_conn
         self.send_conn = send_conn
-        self.model = self.load_model()
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path, trust_remote_code=True
         )
+        self.model = self.load_model()
 
     def get_model_args(self, config_filename: str) -> ModelArgs:
         try:
