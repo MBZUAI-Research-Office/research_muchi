@@ -77,7 +77,10 @@ class LruCache(OrderedDict):
 
 class RawWeights:
 
-    def __init__(self, n_layers: int, experts: dict, non_experts: dict) -> None:
+    def __init__(
+        self, n_layers: int, experts: dict, non_experts: dict, dummy_in: mx.array
+    ) -> None:
+        self.dummy_in = dummy_in
         raw_ptrs = {i: {} for i in range(n_layers)}
         lib_ptrs = {}
         for i, mat in enumerate(non_experts["wqkv_weights"]):
@@ -406,14 +409,12 @@ class DBRX(nn.Module):
         self,
         args: ModelArgs,
         raw_weights: RawWeights,
-        dummy_in: mx.array,
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
     ):
         super().__init__()
         self.n_layers = args.n_layers
         self.raw_weights = raw_weights
-        self.dummy_in = dummy_in
         self.wte = nn.Embedding(args.vocab_size, args.d_model)
         self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.resv_conn = resv_conn
@@ -432,7 +433,7 @@ class DBRX(nn.Module):
         return mx.random.categorical(logits * (1 / temp))
 
     def dry_run(self, li: int):
-        x = self.wte(self.dummy_in)
+        x = self.wte(self.raw_weights.dummy_in)
         y = self.blocks[li](x, self.raw_weights, dry=True)[0]
         mx.eval(self.out_transform(y, DEFAULT_TEMP))
 
@@ -536,10 +537,10 @@ class Generator:
         dummy_in = mx.array(self.tokenizer.encode("hello"))[None]
         mx.eval(non_experts, experts, dummy_in)
 
-        raw_weights = RawWeights(self.model_args.n_layers, experts, non_experts)
-        model = DBRX(
-            self.model_args, raw_weights, dummy_in, self.resv_conn, self.send_conn
+        raw_weights = RawWeights(
+            self.model_args.n_layers, experts, non_experts, dummy_in
         )
+        model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
         model.load_weights(list(raw_weights.lib_ptrs.items()))
         model.eval()
 
