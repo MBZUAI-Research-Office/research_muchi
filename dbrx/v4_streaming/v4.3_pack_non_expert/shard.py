@@ -227,7 +227,7 @@ class DistributedMoeBlock(nn.Module):
         self.layer_num = layer_num
         self.d_model = args.d_model
         self.n_layers = args.n_layers
-        self.num_experts_per_tok = args.ffn_config["moe_top_k"]
+        self.ne = args.ffn_config["moe_top_k"]
 
         self.url = args.ffn_config["shard_url"]
         self.e_to_g = args.ffn_config["e_to_g"]
@@ -271,8 +271,15 @@ class DistributedMoeBlock(nn.Module):
         return jobs, job_map
 
     def moe_shard(
-        self, x: mx.array, job: set, ws: dict, dry: bool = False
-    ) -> tuple[mx.array, dict]:
+        self,
+        x: mx.array,
+        job: set,
+        ws: dict,
+        dryness: int = 0,
+    ):
+        if dryness == 2:
+            return mx.ones((self.d_model, self.ne), dtype=x.dtype)
+
         expert_outs = []
         arr_map = {}
         for e in job:
@@ -280,7 +287,9 @@ class DistributedMoeBlock(nn.Module):
             expert_outs.append(y)
             arr_map[e] = len(expert_outs) - 1
 
-        return mx.stack(expert_outs, axis=-1 if dry else 0), arr_map
+        if dryness == 1:
+            return mx.stack(expert_outs, axis=-1)
+        return mx.stack(expert_outs, axis=0), arr_map
 
     def call_shard_n_all_dispatch(
         self,
@@ -288,7 +297,7 @@ class DistributedMoeBlock(nn.Module):
         jobs: list[set],
         ws: dict,
         send_conn: connection.Connection,
-        dry_runner: Callable[[int], None],
+        dry_runner: Callable[[int, int], None],
     ):
         tic = time.perf_counter_ns()
 
@@ -297,7 +306,7 @@ class DistributedMoeBlock(nn.Module):
             expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws)
             mx.eval(expert_outs)
             if (bi + 1) % self.n_layers == 0:
-                dry_runner(self.layer_num - 1)
+                dry_runner(self.layer_num - 1, 2)
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
@@ -323,10 +332,9 @@ class DistributedMoeBlock(nn.Module):
         resv_conn: Optional[connection.Connection] = None,
         send_conn: Optional[connection.Connection] = None,
         executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
-        dry: Optional[bool] = False,
-        dry_runner: Optional[Callable[[int], None]] = None,
+        dryness: Optional[int] = 0,
+        dry_runner: Optional[Callable[[int, int], None]] = None,
     ) -> mx.array:
-        ne = self.num_experts_per_tok
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
         x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
         ws = raw_weights(self.layer_num)
@@ -334,17 +342,19 @@ class DistributedMoeBlock(nn.Module):
         gates = x @ ws["router"].T
         gates = mx.softmax(gates.astype(mx.float32), axis=-1)
 
-        inds = mx.stop_gradient(mx.argpartition(-gates, kth=ne, axis=-1)[:, :ne])
+        inds = mx.stop_gradient(
+            mx.argpartition(-gates, kth=self.ne, axis=-1)[:, : self.ne]
+        )
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
         mx.eval(inds, scores)
 
-        if dry:
+        if dryness > 0:
             # bypass cluster communication and expects batch_size = 1
-            dummy_job = {raw_weights.expert_lru.get_lru() for _ in range(ne)}
+            dummy_job = {raw_weights.expert_lru.get_lru() for _ in range(self.ne)}
             for xt, st in zip(x, scores):
-                y = self.moe_shard(xt, dummy_job, ws, dry)[0]
+                y = self.moe_shard(xt, dummy_job, ws, dryness)[0]
                 mx.eval(y)
                 y = (y * st).sum(axis=-1)
                 return mx.stack([y], axis=0).reshape(orig_shape)
@@ -396,11 +406,13 @@ class DecoderLayer(nn.Module):
         resv_conn: Optional[connection.Connection] = None,
         send_conn: Optional[connection.Connection] = None,
         executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
-        dry: Optional[bool] = False,
-        dry_runner: Optional[Callable[[int], None]] = None,
+        dryness: Optional[int] = 0,
+        dry_runner: Optional[Callable[[int, int], None]] = None,
     ):
         r, h, cache = self.norm_attn_norm(x, raw_weights, mask, cache)
-        out = self.ffn(h, raw_weights, resv_conn, send_conn, executor, dry, dry_runner)
+        out = self.ffn(
+            h, raw_weights, resv_conn, send_conn, executor, dryness, dry_runner
+        )
         return out + r, cache
 
 
@@ -432,9 +444,9 @@ class DBRX(nn.Module):
             return mx.argmax(logits, axis=-1)
         return mx.random.categorical(logits * (1 / temp))
 
-    def dry_run(self, li: int):
+    def dry_run(self, li: int, dryness: int):
         x = self.wte(self.raw_weights.dummy_in)
-        y = self.blocks[li](x, self.raw_weights, dry=True)[0]
+        y = self.blocks[li](x, self.raw_weights, dryness=dryness)[0]
         mx.eval(self.out_transform(y, DEFAULT_TEMP))
 
     def prewarm(self):
@@ -444,7 +456,7 @@ class DBRX(nn.Module):
                 y = mx.sum(mx.stack(self.raw_weights.full_warmup, axis=0), axis=0)
                 mx.eval(y)
             else:
-                self.dry_run(li)
+                self.dry_run(li, 1)
             self.sync_w_oths()
 
     def __call__(
