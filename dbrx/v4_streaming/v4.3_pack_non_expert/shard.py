@@ -307,7 +307,7 @@ class DistributedMoeBlock(nn.Module):
             expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws)
             mx.eval(expert_outs)
             if (bi + 1) % self.n_layers == 0:
-                dry_runner(self.layer_num - 1, 2, **dry_runner_args)
+                dry_runner(self.layer_num, 2, **dry_runner_args)
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
