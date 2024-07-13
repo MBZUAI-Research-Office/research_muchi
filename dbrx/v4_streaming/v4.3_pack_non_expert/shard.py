@@ -297,8 +297,7 @@ class DistributedMoeBlock(nn.Module):
         jobs: list[set],
         ws: dict,
         send_conn: connection.Connection,
-        dry_runner: Callable,
-        dry_runner_args: dict,
+        dry_runner: Callable[[int, int], None],
     ):
         tic = time.perf_counter_ns()
 
@@ -307,7 +306,7 @@ class DistributedMoeBlock(nn.Module):
             expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws)
             mx.eval(expert_outs)
             if (bi + 1) % self.n_layers == 0:
-                dry_runner(self.layer_num, 2, **dry_runner_args)
+                dry_runner(self.layer_num - 1, 2)
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
@@ -334,8 +333,7 @@ class DistributedMoeBlock(nn.Module):
         send_conn: Optional[connection.Connection] = None,
         executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
         dryness: Optional[int] = 0,
-        dry_runner: Optional[Callable] = None,
-        dry_runner_args: Optional[dict] = None,
+        dry_runner: Optional[Callable[[int, int], None]] = None,
     ) -> mx.array:
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
         x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
@@ -369,7 +367,7 @@ class DistributedMoeBlock(nn.Module):
 
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
         shard_outs, moe_lat = self.call_shard_n_all_dispatch(
-            x, jobs, ws, send_conn, dry_runner, dry_runner_args
+            x, jobs, ws, send_conn, dry_runner
         )
         shard_outs.update(comm_fut.result())
 
@@ -413,14 +411,7 @@ class DecoderLayer(nn.Module):
     ):
         r, h, cache = self.norm_attn_norm(x, raw_weights, mask, cache)
         out = self.ffn(
-            h,
-            raw_weights,
-            resv_conn,
-            send_conn,
-            executor,
-            dryness,
-            dry_runner,
-            {"mask": mask, "cache": cache},
+            h, raw_weights, resv_conn, send_conn, executor, dryness, dry_runner
         )
         return out + r, cache
 
@@ -453,32 +444,19 @@ class DBRX(nn.Module):
             return mx.argmax(logits, axis=-1)
         return mx.random.categorical(logits * (1 / temp))
 
-    def dry_run(
-        self,
-        li: int,
-        dryness: int,
-        mask: Optional[mx.array] = None,
-        cache: Optional[Tuple[mx.array, mx.array]] = None,
-    ):
+    def dry_run(self, li: int, dryness: int):
         x = self.wte(self.raw_weights.dummy_in)
-        y = self.blocks[li](
-            x, self.raw_weights, mask=mask, cache=cache, dryness=dryness
-        )[0]
+        y = self.blocks[li](x, self.raw_weights, dryness=dryness)[0]
         mx.eval(self.out_transform(y, DEFAULT_TEMP))
 
-    def prewarm(
-        self,
-        cache: Optional[list] = None,
-        dry_only: bool = False,
-    ):
+    def prewarm(self, dry_only: bool = False):
         mid = self.n_layers // 2
         for li in range(mid if dry_only else 0, self.n_layers):
             if li < mid:
                 y = mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0)
                 mx.eval(y)
             else:
-                # dummy_in has seq_len = 1 so does not need mask
-                self.dry_run(li, 1, cache=cache[li] if cache is not None else cache)
+                self.dry_run(li, 1)
             self.sync_w_oths(li)
 
     def __call__(
@@ -507,12 +485,13 @@ class DBRX(nn.Module):
             h, cache[e] = layer(
                 h,
                 self.raw_weights,
-                mask=mask,
-                cache=cache[e],
-                resv_conn=self.resv_conn,
-                send_conn=self.send_conn,
-                executor=executor,
-                dry_runner=self.dry_run,
+                mask,
+                cache[e],
+                self.resv_conn,
+                self.send_conn,
+                executor,
+                0,
+                self.dry_run,
             )
 
         out = self.out_transform(h, temp)
@@ -520,7 +499,7 @@ class DBRX(nn.Module):
 
         if batch_size > 1:
             # for token generation
-            self.prewarm(cache=cache, dry_only=True)
+            self.prewarm(dry_only=True)
 
         return out, cache
 
