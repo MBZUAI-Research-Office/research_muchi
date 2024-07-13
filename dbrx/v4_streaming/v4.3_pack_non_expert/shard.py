@@ -115,30 +115,30 @@ class RawWeights:
                 else:
                     raw_ptrs[i][e]["w2"] = mat
 
-        ne_warmup = []
+        ne_reps = []
         for vec in raw_ptrs[0]["wqkv"]:
-            ne_warmup.append(vec)
+            ne_reps.append(vec)
             break
         for vec in raw_ptrs[0]["out_proj"]:
-            ne_warmup.append(vec)
+            ne_reps.append(vec)
             break
         for vec in raw_ptrs[0]["router"]:
-            ne_warmup.append(vec)
+            ne_reps.append(vec)
             break
         for vec in lib_ptrs["wte.weight"]:
-            ne_warmup.append(vec)
+            ne_reps.append(vec)
             break
-        ne_warmup.append(lib_ptrs["blocks.0.norm_attn_norm.norm_1.weight"])
+        ne_reps.append(lib_ptrs["blocks.0.norm_attn_norm.norm_1.weight"])
 
-        e_warmup = []
+        e_reps = []
         for e in experts:
             for vec in raw_ptrs[0][e]["v1"]:
-                e_warmup.append(vec)
+                e_reps.append(vec)
                 break
 
         self.raw_ptrs = raw_ptrs
         self.lib_ptrs = lib_ptrs
-        self.full_warmup = ne_warmup + e_warmup
+        self.rep_vecs = ne_reps + e_reps
         self.expert_lru = LruCache.fromkeys(experts.keys())
 
     def __call__(self, k):
@@ -453,7 +453,7 @@ class DBRX(nn.Module):
         mid = self.n_layers // 2
         for li in range(self.n_layers):
             if li < mid:
-                y = mx.sum(mx.stack(self.raw_weights.full_warmup, axis=0), axis=0)
+                y = mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0)
                 mx.eval(y)
             else:
                 self.dry_run(li, 1)
@@ -494,8 +494,6 @@ class DBRX(nn.Module):
                 self.dry_run,
             )
 
-        if batch_size > 1:
-            self.dry_run(0)
         return self.out_transform(h, temp), cache
 
 
