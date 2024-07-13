@@ -433,8 +433,8 @@ class DBRX(nn.Module):
         self.send_conn = send_conn
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
 
-    def sync_w_oths(self):
-        self.send_conn.send(True)  # signals that I am ready
+    def sync_w_oths(self, li: int):
+        self.send_conn.send(li)  # signals that I am ready
         self.resv_conn.recv()  # confirms that everyone else is done
 
     def out_transform(self, x: mx.array, temp: float) -> mx.array:
@@ -449,15 +449,15 @@ class DBRX(nn.Module):
         y = self.blocks[li](x, self.raw_weights, dryness=dryness)[0]
         mx.eval(self.out_transform(y, DEFAULT_TEMP))
 
-    def prewarm(self):
+    def prewarm(self, dry_only: bool = False):
         mid = self.n_layers // 2
-        for li in range(self.n_layers):
+        for li in range(mid if dry_only else 0, self.n_layers):
             if li < mid:
                 y = mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0)
                 mx.eval(y)
             else:
                 self.dry_run(li, 1)
-            self.sync_w_oths()
+            self.sync_w_oths(li)
 
     def __call__(
         self,
@@ -494,7 +494,14 @@ class DBRX(nn.Module):
                 self.dry_run,
             )
 
-        return self.out_transform(h, temp), cache
+        out = self.out_transform(h, temp)
+        mx.eval(out)
+
+        if batch_size > 1:
+            # for token generation
+            self.prewarm(dry_only=True)
+
+        return out, cache
 
 
 class Generator:
@@ -712,7 +719,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
     async def sync_w_oths(
         self,
         oth_shards: list,
-        li: int = None,
         before_warming: bool = False,
     ) -> None:
 
@@ -725,7 +731,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             while not self.resv_conn.poll():
                 await asyncio.sleep(0)
 
-            self.resv_conn.recv()  # means warmer is done
+            li = self.resv_conn.recv()  # means warmer is done
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
@@ -762,6 +768,12 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         url, li, bi, arr_map = pickle.loads(request.metadata)
         self.buffer.put((request.data, request.metadata), li, bi)
         return shard_envoy_pb2.Empty()
+
+    async def prewarm(self, start: int, oth_shards: list):
+        for _ in range(start, self.config["n_layers"]):
+            await self.sync_w_oths(oth_shards)
+            # signals warmer that this layer is done
+            self.send_conn.send(True)
 
     async def Generate(self, request: shard_envoy_pb2.UsrIns, context):
         logging.info(f"received generation request")
@@ -806,11 +818,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 self.send_conn.send(gen["req"].max_tokens)
 
                 logging.info(f"warming...")
-
-                for li in range(self.config["n_layers"]):
-                    await self.sync_w_oths(oth_shards, li=li)
-                    # signals warmer that this layer is done
-                    self.send_conn.send(True)
+                await self.prewarm(0, oth_shards)
 
                 logging.info(f"processing request...")
 
@@ -821,6 +829,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                             await self.all_dispatch_n_combine(li, bi, oth_shards)
 
                         self.buffer.reset(li)
+
+                    if batch_size > 1:
+                        await self.prewarm(self.config["n_layers"] // 2, oth_shards)
 
                     continue_sig = self.resv_conn.recv()
                     if not continue_sig:
