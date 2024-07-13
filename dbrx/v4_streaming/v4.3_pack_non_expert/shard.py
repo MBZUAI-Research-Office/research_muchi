@@ -354,7 +354,7 @@ class DistributedMoeBlock(nn.Module):
             # bypass cluster communication and expects batch_size = 1
             dummy_job = {raw_weights.expert_lru.get_lru() for _ in range(self.ne)}
             for xt, st in zip(x, scores):
-                y = self.moe_shard(xt, dummy_job, ws, dryness)[0]
+                y = self.moe_shard(xt, dummy_job, ws, dryness)
                 mx.eval(y)
                 y = (y * st).sum(axis=-1)
                 return mx.stack([y], axis=0).reshape(orig_shape)
