@@ -77,89 +77,60 @@ class LruCache(OrderedDict):
 
 class RawWeights:
 
-    def __init__(
-        self,
-        n_layers: int,
-        wte: mx.array,
-        wqkv: mx.array,
-        out_proj: mx.array,
-        experts: dict,
-        lm_head: mx.array,
-    ) -> None:
-        ptrs = {i: {} for i in range(n_layers)}
-        ptrs["wte"] = wte
-        for i, mat in enumerate(wqkv["weights"]):
-            ptrs[i]["wqkv"] = mat
-        for i, mat in enumerate(out_proj["weights"]):
-            ptrs[i]["out_proj"] = mat
-        for e, d in experts.items():
-            for j, mat in enumerate(d["weights"]):
-                i = j // 3
-                if e not in ptrs[i]:
-                    ptrs[i][e] = {}
-                if j % 3 == 0:
-                    ptrs[i][e]["v1"] = mat
-                elif j % 3 == 1:
-                    ptrs[i][e]["w1"] = mat
-                else:
-                    ptrs[i][e]["w2"] = mat
-        ptrs["lm_head"] = lm_head
-
-        ne_warmup = []
-        for vec in ptrs["wte"]:
-            ne_warmup.append(vec)
-            break
-        for vec in ptrs[0]["wqkv"]:
-            ne_warmup.append(vec)
-            break
-        for vec in ptrs[0]["out_proj"]:
-            ne_warmup.append(vec)
-            break
-        for vec in ptrs["lm_head"]:
-            ne_warmup.append(vec)
-            break
-
-        e_warmup = []
-        for e in experts:
-            for vec in ptrs[0][e]["v1"]:
-                e_warmup.append(vec)
-                break
-
-        self.ptrs = ptrs
-        self.ne_warmup = ne_warmup
-        self.e_warmup = e_warmup
+    def __init__(self, experts: dict) -> None:
+        self.experts = experts
+        self.setup_generators()
         self.expert_lru = LruCache.fromkeys(experts.keys())
 
-    def __call__(self, k):
-        return self.ptrs[k]
+    def setup_generators(self):
+
+        def expert_generator(e):
+            v1, w1 = None, None
+            while True:
+                for i, weight in enumerate(self.experts[e]["weights"]):
+                    if i % 3 == 0:
+                        v1 = weight
+                    elif i % 3 == 1:
+                        w1 = weight
+                    else:
+                        yield v1, w1, weight
+
+        for e in self.experts:
+            self.experts[e]["generator"] = expert_generator(e)
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs, layer_num: int):
+    def __init__(self, args: ModelArgs):
         super().__init__()
-        self.layer_num = layer_num
         self.num_heads = args.n_heads
         self.d_model = args.d_model
         self.head_dim = args.d_model // args.n_heads
         self.num_key_value_heads = args.attn_config["kv_n_heads"]
         self.clip_qkv = args.attn_config["clip_qkv"]
+        self.rope_theta = args.attn_config["rope_theta"]
 
         self.scale = self.head_dim**-0.5
+
+        self.Wqkv = nn.Linear(
+            args.d_model,
+            (self.num_key_value_heads * 2 + self.num_heads) * self.head_dim,
+            bias=False,
+        )
+        self.out_proj = nn.Linear(args.d_model, args.d_model, bias=False)
         self.rope = nn.RoPE(
             self.head_dim,
             traditional=False,
-            base=args.attn_config["rope_theta"],
+            base=self.rope_theta,
         )
 
     def __call__(
         self,
         x: mx.array,
-        raw_weights: RawWeights,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-        ws = raw_weights(self.layer_num)
-        qkv = x @ ws["wqkv"].T
+
+        qkv = self.Wqkv(x)
         qkv = mx.clip(qkv, a_min=-self.clip_qkv, a_max=self.clip_qkv)
         splits = [self.d_model, self.d_model + self.head_dim * self.num_key_value_heads]
         queries, keys, values = mx.split(qkv, splits, axis=-1)
@@ -187,24 +158,23 @@ class Attention(nn.Module):
             queries, keys, values, scale=self.scale, mask=mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return output @ ws["out_proj"].T, (keys, values)
+        return self.out_proj(output), (keys, values)
 
 
 class NormAttnNorm(nn.Module):
-    def __init__(self, args: ModelArgs, layer_num: int):
+    def __init__(self, args: ModelArgs):
         super().__init__()
         self.norm_1 = nn.LayerNorm(args.d_model, bias=False)
         self.norm_2 = nn.LayerNorm(args.d_model, bias=False)
-        self.attn = Attention(args, layer_num)
+        self.attn = Attention(args)
 
     def __call__(
         self,
         x: mx.array,
-        raw_weights: RawWeights,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-        h, cache = self.attn(self.norm_1(x), raw_weights, mask=mask, cache=cache)
+        h, cache = self.attn(self.norm_1(x), mask=mask, cache=cache)
         x = h + x
         return x, self.norm_2(x), cache
 
@@ -224,17 +194,17 @@ class DistributedMoeBlock(nn.Module):
         self.act_fn = nn.silu
         self.layer_num = layer_num
         self.d_model = args.d_model
+        self.ne = args.ffn_config["moe_top_k"]
 
         self.url = args.ffn_config["shard_url"]
         self.e_to_g = args.ffn_config["e_to_g"]
         self.dlb_groups = args.ffn_config["dlb_groups"]
         self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
+        self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
-        self.n_experts_in_cluster = args.ffn_config["moe_num_experts"]
-        self.num_experts_per_tok = args.ffn_config["moe_top_k"]
-        self.router = Router(args.d_model, self.n_experts_in_cluster)
-
-    def allocate_jobs(self, inds: list[list[int]], expert_lru: LruCache) -> tuple:
+    def allocate_jobs(
+        self, inds: list[list[int]], expert_lru: LruCache, dry_run: bool
+    ) -> tuple:
         jobs = []
         job_map = []
         max_loads = []
@@ -266,44 +236,41 @@ class DistributedMoeBlock(nn.Module):
             for _ in range(n_warmups):
                 jobs[i].add(expert_lru.get_lru())
 
-            LOGS["experts_act"].append(len(jobs[i]))
+            if not dry_run:
+                LOGS["experts_act"].append(len(jobs[i]))
 
         return jobs, job_map
 
-    def moe_shard(self, x: mx.array, job: set, ws: dict) -> tuple[mx.array, dict]:
-        expert_outs = []
-        arr_map = {}
-        for e in job:
-            y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
-            expert_outs.append(y)
-            arr_map[e] = len(expert_outs) - 1
+    def moe_shard(self, x: mx.array, jobs: list[set], weights: RawWeights):
+        ws = {e: next(d["generator"]) for e, d in weights.experts.items()}
+        for xt, job in zip(x, jobs):
+            expert_outs = []
+            arr_map = {}
+            for e in job:
+                v1, w1, w2 = ws[e]
+                expert_outs.append((self.act_fn(xt @ w1.T) * (xt @ v1.T)) @ w2)
+                arr_map[e] = len(expert_outs) - 1
 
-        expert_outs = mx.stack(expert_outs, axis=0)
-        return expert_outs, arr_map
+            expert_outs = mx.stack(expert_outs, axis=0)
+            yield expert_outs, arr_map
 
-    def call_shard_n_all_dispatch(
+    def all_dispatch(
         self,
         x: mx.array,
         jobs: list[set],
-        raw_weights: RawWeights,
+        weights: RawWeights,
         send_conn: connection.Connection,
     ):
         tic = time.perf_counter_ns()
 
-        ws = raw_weights.ptrs[self.layer_num]
         shard_outs = {}
-        for bi, xt in enumerate(x):
-            expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws)
-            if len(jobs) > 1:
-                ne_warmup_calc = mx.sum(mx.stack(raw_weights.ne_warmup, axis=0), axis=0)
-                mx.eval(expert_outs, ne_warmup_calc)
-            else:
-                mx.eval(expert_outs)
-            shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
+        for bi, (expert_outs, arr_map) in enumerate(self.moe_shard(x, jobs, weights)):
+            mx.eval(expert_outs)
+            shard_outs[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
 
-        return shard_outs, time.perf_counter_ns() - tic
+        return {self.url: shard_outs}, time.perf_counter_ns() - tic
 
     def all_combine(
         self,
@@ -324,40 +291,35 @@ class DistributedMoeBlock(nn.Module):
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
         executor: concurrent.futures.ThreadPoolExecutor,
+        dry_run: bool,
     ) -> mx.array:
-        ne = self.num_experts_per_tok
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
         x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
 
         gates = self.router(x)
         gates = mx.softmax(gates.astype(mx.float32), axis=-1)
 
-        inds = mx.stop_gradient(mx.argpartition(-gates, kth=ne, axis=-1)[:, :ne])
+        inds = mx.stop_gradient(
+            mx.argpartition(-gates, kth=self.ne, axis=-1)[:, : self.ne]
+        )
         scores = mx.take_along_axis(gates, inds, axis=-1)
         scores = scores / mx.linalg.norm(scores, ord=1, axis=-1, keepdims=True)
         scores = scores.astype(x.dtype)
         mx.eval(inds, scores)
 
         inds = inds.tolist()
-        jobs, job_map = self.allocate_jobs(inds, raw_weights.expert_lru)
+        jobs, job_map = self.allocate_jobs(inds, raw_weights.expert_lru, dry_run)
         batch_size = x.shape[0]
-        shard_outs = {}
 
         tic = time.perf_counter_ns()
 
-        compute_fut = executor.submit(
-            self.call_shard_n_all_dispatch, x, jobs, raw_weights, send_conn
-        )
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
-        fut_map = {compute_fut: "moe", comm_fut: "comm"}
-        for fut in concurrent.futures.as_completed(fut_map):
-            if fut_map[fut] == "moe":
-                shard_outs.update(fut.result()[0])
-                LOGS["moe_lat"].append(fut.result()[1])
-            else:
-                shard_outs.update(fut.result())
+        shard_outs, moe_lat = self.all_dispatch(x, jobs, raw_weights, send_conn)
+        shard_outs.update(comm_fut.result())
 
-        LOGS["comm_lat"].append(time.perf_counter_ns() - tic - LOGS["moe_lat"][-1])
+        if not dry_run:
+            LOGS["moe_lat"].append(moe_lat)
+            LOGS["comm_lat"].append(time.perf_counter_ns() - tic - moe_lat)
 
         y = []
 
@@ -380,7 +342,7 @@ class DecoderLayer(nn.Module):
     def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
         self.ffn = DistributedMoeBlock(args, layer_num)
-        self.norm_attn_norm = NormAttnNorm(args, layer_num)
+        self.norm_attn_norm = NormAttnNorm(args)
 
     def __call__(
         self,
@@ -389,11 +351,12 @@ class DecoderLayer(nn.Module):
         resv_conn: connection.Connection,
         send_conn: connection.Connection,
         executor: concurrent.futures.ThreadPoolExecutor,
+        dry_run: bool,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
-    ) -> mx.array:
-        r, h, cache = self.norm_attn_norm(x, raw_weights, mask, cache)
-        out = self.ffn(h, raw_weights, resv_conn, send_conn, executor) + r
+    ):
+        r, h, cache = self.norm_attn_norm(x, mask, cache)
+        out = self.ffn(h, raw_weights, resv_conn, send_conn, executor, dry_run) + r
         return out, cache
 
 
@@ -408,27 +371,37 @@ class DBRX(nn.Module):
         super().__init__()
         self.n_layers = args.n_layers
         self.raw_weights = raw_weights
-        self.wte = nn.Embedding(args.vocab_size, args.d_model)
-        self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.resv_conn = resv_conn
         self.send_conn = send_conn
+        self.wte = nn.Embedding(args.vocab_size, args.d_model)
+        self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
+        self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
 
-    def sync_w_oths(self):
-        self.send_conn.send(True)  # signals that I am ready
-        self.resv_conn.recv()  # confirms that everyone else is done
+    def out_transform(self, x: mx.array, temp: float) -> mx.array:
+        logits = self.lm_head(self.norm_f(x))
+        logits = logits[:, -1, :]
+        if temp == 0:
+            return mx.argmax(logits, axis=-1)
+        return mx.random.categorical(logits * (1 / temp))
 
     def prewarm(self):
-        vecs = self.raw_weights.ne_warmup + self.raw_weights.e_warmup
-        for _ in range(self.n_layers):
-            mx.eval(mx.sum(mx.stack(vecs, axis=0), axis=0))
-            self.sync_w_oths()
+        for li in range(self.n_layers):
+            xs = []
+            for d in self.raw_weights.experts.values():
+                xs.extend(next(d["generator"]))
+            y = mx.sum(mx.stack(xs, axis=0), axis=0)
+            mx.eval(y)
+            self.send_conn.send(li)  # signals that I am ready
+            self.resv_conn.recv()  # confirms that everyone else is done
 
     def __call__(
         self,
         inputs: mx.array,
+        temp: float,
         executor: concurrent.futures.ThreadPoolExecutor,
-        cache=None,
+        cache: Optional[list[Tuple[mx.array, mx.array]]] = None,
+        dry_run: Optional[bool] = False,
     ):
         h = self.wte(inputs)
 
@@ -441,21 +414,28 @@ class DBRX(nn.Module):
         if cache is None:
             cache = [None] * len(self.blocks)
 
-        # h.shape = (sample_size, sequence_length, d_model)
-        self.send_conn.send(h.shape[0] * T)
+        if not dry_run:
+            # h.shape = (sample_size, sequence_length, d_model)
+            self.send_conn.send(h.shape[0] * T)
 
         for e, layer in enumerate(self.blocks):
-            h, cache[e] = layer(
+            h, updated_cache = layer(
                 h,
                 self.raw_weights,
                 self.resv_conn,
                 self.send_conn,
                 executor,
-                mask,
-                cache[e],
+                dry_run,
+                mask=mask,
+                cache=cache[e],
             )
+            if dry_run:
+                continue
+            cache[e] = updated_cache
 
-        return self.norm_f(h) @ self.raw_weights("lm_head").T, cache
+        out = self.out_transform(h, temp)
+        mx.eval(out)
+        return out, cache
 
 
 class Generator:
@@ -472,10 +452,10 @@ class Generator:
         self.model_args = self.get_model_args(config_filename)
         self.resv_conn = resv_conn
         self.send_conn = send_conn
-        self.model = self.load_model()
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path, trust_remote_code=True
         )
+        self.model = self.load_model()
 
     def get_model_args(self, config_filename: str) -> ModelArgs:
         try:
@@ -498,27 +478,19 @@ class Generator:
         return model_args
 
     def load_model(self) -> DBRX:
-        wqkv = mx.load(str(self.model_path / f"wqkv.safetensors"))
-        out_proj = mx.load(str(self.model_path / f"out_proj.safetensors"))
-        oth_non_es = mx.load(str(self.model_path / f"non-expert.safetensors"))
+        non_experts = mx.load(str(self.model_path / f"non-expert.safetensors"))
         # sample:
         # {0: {"weights": mx.array([0, 1, 2, 3])}}
         experts = {
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
             for e in self.model_args.ffn_config["assigned_experts"]
         }
-        mx.eval(wqkv, out_proj, oth_non_es, experts)
+        mx.eval(experts)
 
-        raw_weights = RawWeights(
-            self.model_args.n_layers,
-            oth_non_es["wte.weight"],  # lookup table
-            wqkv,
-            out_proj,
-            experts,
-            oth_non_es.pop("lm_head.weight"),
-        )
+        raw_weights = RawWeights(experts)
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
-        model.load_weights(list(oth_non_es.items()))
+        model.load_weights(list(non_experts.items()))
+        mx.eval(model.parameters())
         model.eval()
 
         return model
@@ -530,15 +502,6 @@ class Generator:
         temp: float,
         executor: concurrent.futures.ThreadPoolExecutor,
     ):
-
-        def sample(logits: mx.array) -> Tuple[mx.array, float]:
-            if temp == 0:
-                token = mx.argmax(logits, axis=-1)
-            else:
-                token = mx.random.categorical(logits * (1 / temp))
-
-            return token
-
         prompt_tokens = mx.array(self.tokenizer.encode(prompt))
         y = prompt_tokens
         cache = None
@@ -550,12 +513,13 @@ class Generator:
         tic = time.perf_counter()
 
         for n in range(max_tokens):
-            logits, cache = self.model(y[None], executor, cache=cache)
-            logits = logits[:, -1, :]
-            y = sample(logits)
+            y, cache = self.model(y[None], temp, executor, cache=cache)
 
             token = y.item()  # get word ID
             if n == 0:
+                if token != self.tokenizer.eos_token_id:
+                    # token generation dry run
+                    self.model(y[None], temp, executor, cache=cache, dry_run=True)
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
             if token == self.tokenizer.eos_token_id:
@@ -571,7 +535,6 @@ class Generator:
 
             self.send_conn.send(True)
 
-        token_count = n + 1
         token_strings.append(
             self.tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, "")
         )
@@ -581,7 +544,7 @@ class Generator:
             prompt_time,
             prompt_tokens.size,
             gen_time,
-            token_count,
+            n,
             "".join(token_strings),
         ]
 
@@ -596,13 +559,14 @@ class Generator:
                 for k in ["moe_lat", "comm_lat", "experts_act"]:
                     if len(LOGS[k]) <= 40:
                         # no token generated
-                        LOGS[k] = []
                         res.append(0)
                         continue
-                    avg = statistics.mean(LOGS[k][40:])
-                    if k != "experts_act":
-                        avg /= 1000**2
-                    res.append(avg)
+                    else:
+                        avg = statistics.mean(LOGS[k][40:])
+                        if k != "experts_act":
+                            avg /= 1000**2
+                        res.append(avg)
+
                     LOGS[k] = []
 
                 self.send_conn.send(res)
@@ -690,11 +654,10 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
     async def sync_w_oths(
         self,
         oth_shards: list,
-        li: int = None,
         before_warming: bool = False,
     ) -> None:
 
-        async def signal(shard):
+        async def signal(shard, li):
             await shard.SignalReady(shard_envoy_pb2.Identifier(li=li))
 
         if before_warming:
@@ -703,11 +666,11 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             while not self.resv_conn.poll():
                 await asyncio.sleep(0)
 
-            self.resv_conn.recv()  # means warmer is done
+            li = self.resv_conn.recv()  # means warmer is done
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
-                tg.create_task(signal(shard))
+                tg.create_task(signal(shard, li))
             tg.create_task(self.buffer.wait_til_full(li))
 
         self.buffer.reset(li)
@@ -785,20 +748,26 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 logging.info(f"warming...")
 
-                for li in range(self.config["n_layers"]):
-                    await self.sync_w_oths(oth_shards, li=li)
+                for _ in range(self.config["n_layers"]):
+                    await self.sync_w_oths(oth_shards)
                     # signals warmer that this layer is done
                     self.send_conn.send(True)
 
                 logging.info(f"processing request...")
 
-                for _ in range(gen["req"].max_tokens):
+                for ti in range(gen["req"].max_tokens):
                     batch_size = self.resv_conn.recv()
                     for li in range(self.config["n_layers"]):
                         for bi in range(batch_size):
                             await self.all_dispatch_n_combine(li, bi, oth_shards)
 
                         self.buffer.reset(li)
+
+                    if ti == 0:
+                        # token generation dry run
+                        for li in range(self.config["n_layers"]):
+                            await self.all_dispatch_n_combine(li, 0, oth_shards)
+                            self.buffer.reset(li)
 
                     continue_sig = self.resv_conn.recv()
                     if not continue_sig:
