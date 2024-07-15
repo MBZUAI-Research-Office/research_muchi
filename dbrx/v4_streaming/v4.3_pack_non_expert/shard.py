@@ -453,7 +453,6 @@ class DBRX(nn.Module):
             # h.shape = (sample_size, sequence_length, d_model)
             self.send_conn.send(h.shape[0] * T)
 
-        barrier = self.n_layers // 8
         for e, layer in enumerate(self.blocks):
             h, updated_cache = layer(
                 h,
@@ -466,9 +465,7 @@ class DBRX(nn.Module):
                 cache=cache[e],
             )
             if dry_run:
-                if e < barrier - 1:
-                    continue
-                break
+                continue
             cache[e] = updated_cache
 
         out = self.out_transform(h, temp)
@@ -556,7 +553,7 @@ class Generator:
             if n == 0:
                 if token != self.tokenizer.eos_token_id:
                     # token generation dry run
-                    for _ in range(8):
+                    for _ in range(2):
                         self.model(y[None], temp, executor, cache=cache, dry_run=True)
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
@@ -803,8 +800,8 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                     if ti == 0:
                         # token generation dry run
-                        for _ in range(8):
-                            for li in range(self.config["n_layers"] // 8):
+                        for _ in range(2):
+                            for li in range(self.config["n_layers"]):
                                 await self.all_dispatch_n_combine(li, 0, oth_shards)
                                 self.buffer.reset(li)
 
