@@ -77,99 +77,60 @@ class LruCache(OrderedDict):
 
 class RawWeights:
 
-    def __init__(self, n_layers: int, experts: dict, non_experts: dict) -> None:
-        raw_ptrs = {i: {} for i in range(n_layers)}
-        lib_ptrs = {}
-        for i, mat in enumerate(non_experts["wqkv_weights"]):
-            raw_ptrs[i]["wqkv"] = mat
-        for i, mat in enumerate(non_experts["out_proj_weights"]):
-            raw_ptrs[i]["out_proj"] = mat
-        for i, mat in enumerate(non_experts["router_weights"]):
-            raw_ptrs[i]["router"] = mat
-        for j, vec in enumerate(non_experts["norm_weights"]):
-            if j == non_experts["norm_weights"].shape[0] - 1:
-                lib_ptrs["norm_f.weight"] = vec
-                continue
-            i = j // 2
-            if j % 2 == 0:
-                lib_ptrs[f"blocks.{i}.norm_attn_norm.norm_1.weight"] = vec
-            elif j % 2 == 1:
-                lib_ptrs[f"blocks.{i}.norm_attn_norm.norm_2.weight"] = vec
-        for i, mat in enumerate(non_experts["vocab_weights"]):
-            if i == 0:
-                lib_ptrs["wte.weight"] = mat
-            elif i == 1:
-                raw_ptrs["lm_head"] = mat
-        for e, d in experts.items():
-            for j, mat in enumerate(d["weights"]):
-                i = j // 3
-                if e not in raw_ptrs[i]:
-                    raw_ptrs[i][e] = {}
-                if j % 3 == 0:
-                    raw_ptrs[i][e]["v1"] = mat
-                elif j % 3 == 1:
-                    raw_ptrs[i][e]["w1"] = mat
-                else:
-                    raw_ptrs[i][e]["w2"] = mat
-
-        ne_reps = []
-        for vec in raw_ptrs[0]["wqkv"]:
-            ne_reps.append(vec)
-            break
-        for vec in raw_ptrs[0]["out_proj"]:
-            ne_reps.append(vec)
-            break
-        for vec in raw_ptrs[0]["router"]:
-            ne_reps.append(vec)
-            break
-        for vec in lib_ptrs["wte.weight"]:
-            ne_reps.append(vec)
-            break
-        ne_reps.append(lib_ptrs["blocks.0.norm_attn_norm.norm_1.weight"])
-
-        e_reps = []
-        for e in experts:
-            for vec in raw_ptrs[0][e]["v1"]:
-                e_reps.append(vec)
-                break
-
-        self.raw_ptrs = raw_ptrs
-        self.lib_ptrs = lib_ptrs
-        self.ne_reps = ne_reps
-        self.rep_vecs = ne_reps + e_reps
+    def __init__(self, experts: dict) -> None:
+        self.experts = experts
+        self.setup_generators()
         self.expert_lru = LruCache.fromkeys(experts.keys())
 
-    def __call__(self, k):
-        return self.raw_ptrs[k]
+    def setup_generators(self):
+
+        def expert_generator(e):
+            v1, w1 = None, None
+            while True:
+                for i, weight in enumerate(self.experts[e]["weights"]):
+                    if i % 3 == 0:
+                        v1 = weight
+                    elif i % 3 == 1:
+                        w1 = weight
+                    else:
+                        yield v1, w1, weight
+
+        for e in self.experts:
+            self.experts[e]["generator"] = expert_generator(e)
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs, layer_num: int):
+    def __init__(self, args: ModelArgs):
         super().__init__()
-        self.layer_num = layer_num
         self.num_heads = args.n_heads
         self.d_model = args.d_model
         self.head_dim = args.d_model // args.n_heads
         self.num_key_value_heads = args.attn_config["kv_n_heads"]
         self.clip_qkv = args.attn_config["clip_qkv"]
+        self.rope_theta = args.attn_config["rope_theta"]
 
         self.scale = self.head_dim**-0.5
+
+        self.Wqkv = nn.Linear(
+            args.d_model,
+            (self.num_key_value_heads * 2 + self.num_heads) * self.head_dim,
+            bias=False,
+        )
+        self.out_proj = nn.Linear(args.d_model, args.d_model, bias=False)
         self.rope = nn.RoPE(
             self.head_dim,
             traditional=False,
-            base=args.attn_config["rope_theta"],
+            base=self.rope_theta,
         )
 
     def __call__(
         self,
         x: mx.array,
-        raw_weights: RawWeights,
-        dry_run: bool,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-        ws = raw_weights(self.layer_num)
-        qkv = x @ ws["wqkv"].T
+
+        qkv = self.Wqkv(x)
         qkv = mx.clip(qkv, a_min=-self.clip_qkv, a_max=self.clip_qkv)
         splits = [self.d_model, self.d_model + self.head_dim * self.num_key_value_heads]
         queries, keys, values = mx.split(qkv, splits, axis=-1)
@@ -197,29 +158,34 @@ class Attention(nn.Module):
             queries, keys, values, scale=self.scale, mask=mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return output @ ws["out_proj"].T, (keys, values) if not dry_run else cache
+        return self.out_proj(output), (keys, values)
 
 
 class NormAttnNorm(nn.Module):
-    def __init__(self, args: ModelArgs, layer_num: int):
+    def __init__(self, args: ModelArgs):
         super().__init__()
         self.norm_1 = nn.LayerNorm(args.d_model, bias=False)
         self.norm_2 = nn.LayerNorm(args.d_model, bias=False)
-        self.attn = Attention(args, layer_num)
+        self.attn = Attention(args)
 
     def __call__(
         self,
         x: mx.array,
-        raw_weights: RawWeights,
-        dry_run: bool,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-        h, cache = self.attn(
-            self.norm_1(x), raw_weights, dry_run, mask=mask, cache=cache
-        )
+        h, cache = self.attn(self.norm_1(x), mask=mask, cache=cache)
         x = h + x
         return x, self.norm_2(x), cache
+
+
+class Router(nn.Module):
+    def __init__(self, d_model: int, num_experts: int):
+        super().__init__()
+        self.layer = nn.Linear(d_model, num_experts, bias=False)
+
+    def __call__(self, x: mx.array):
+        return self.layer(x)
 
 
 class DistributedMoeBlock(nn.Module):
@@ -228,13 +194,13 @@ class DistributedMoeBlock(nn.Module):
         self.act_fn = nn.silu
         self.layer_num = layer_num
         self.d_model = args.d_model
-        self.n_layers = args.n_layers
         self.ne = args.ffn_config["moe_top_k"]
 
         self.url = args.ffn_config["shard_url"]
         self.e_to_g = args.ffn_config["e_to_g"]
         self.dlb_groups = args.ffn_config["dlb_groups"]
         self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
+        self.router = Router(args.d_model, args.ffn_config["moe_num_experts"])
 
     def allocate_jobs(
         self, inds: list[list[int]], expert_lru: LruCache, dry_run: bool
@@ -275,38 +241,36 @@ class DistributedMoeBlock(nn.Module):
 
         return jobs, job_map
 
-    def moe_shard(self, x: mx.array, job: set, ws: dict):
-        expert_outs = []
-        arr_map = {}
-        for e in job:
-            y = (self.act_fn(x @ ws[e]["w1"].T) * (x @ ws[e]["v1"].T)) @ ws[e]["w2"]
-            expert_outs.append(y)
-            arr_map[e] = len(expert_outs) - 1
+    def moe_shard(self, x: mx.array, jobs: list[set], weights: RawWeights):
+        ws = {e: next(d["generator"]) for e, d in weights.experts.items()}
+        for xt, job in zip(x, jobs):
+            expert_outs = []
+            arr_map = {}
+            for e in job:
+                v1, w1, w2 = ws[e]
+                expert_outs.append((self.act_fn(xt @ w1.T) * (xt @ v1.T)) @ w2)
+                arr_map[e] = len(expert_outs) - 1
 
-        return mx.stack(expert_outs, axis=0), arr_map
+            expert_outs = mx.stack(expert_outs, axis=0)
+            yield expert_outs, arr_map
 
-    def call_shard_n_all_dispatch(
+    def all_dispatch(
         self,
         x: mx.array,
         jobs: list[set],
-        ws: dict,
-        ne_reps: list[mx.array],
+        weights: RawWeights,
         send_conn: connection.Connection,
     ):
         tic = time.perf_counter_ns()
 
         shard_outs = {}
-        for bi, xt in enumerate(x):
-            expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws)
-            if len(jobs) > 1:
-                mx.eval(expert_outs, mx.sum(mx.stack(ne_reps, axis=0), axis=0))
-            else:
-                mx.eval(expert_outs)
-            shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
+        for bi, (expert_outs, arr_map) in enumerate(self.moe_shard(x, jobs, weights)):
+            mx.eval(expert_outs)
+            shard_outs[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
 
-        return shard_outs, time.perf_counter_ns() - tic
+        return {self.url: shard_outs}, time.perf_counter_ns() - tic
 
     def all_combine(
         self,
@@ -331,9 +295,8 @@ class DistributedMoeBlock(nn.Module):
     ) -> mx.array:
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
         x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
-        ws = raw_weights(self.layer_num)
 
-        gates = x @ ws["router"].T
+        gates = self.router(x)
         gates = mx.softmax(gates.astype(mx.float32), axis=-1)
 
         inds = mx.stop_gradient(
@@ -351,9 +314,7 @@ class DistributedMoeBlock(nn.Module):
         tic = time.perf_counter_ns()
 
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
-        shard_outs, moe_lat = self.call_shard_n_all_dispatch(
-            x, jobs, ws, raw_weights.ne_reps, send_conn
-        )
+        shard_outs, moe_lat = self.all_dispatch(x, jobs, raw_weights, send_conn)
         shard_outs.update(comm_fut.result())
 
         if not dry_run:
@@ -381,7 +342,7 @@ class DecoderLayer(nn.Module):
     def __init__(self, args: ModelArgs, layer_num: int):
         super().__init__()
         self.ffn = DistributedMoeBlock(args, layer_num)
-        self.norm_attn_norm = NormAttnNorm(args, layer_num)
+        self.norm_attn_norm = NormAttnNorm(args)
 
     def __call__(
         self,
@@ -394,7 +355,7 @@ class DecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ):
-        r, h, cache = self.norm_attn_norm(x, raw_weights, dry_run, mask, cache)
+        r, h, cache = self.norm_attn_norm(x, mask, cache)
         out = self.ffn(h, raw_weights, resv_conn, send_conn, executor, dry_run) + r
         return out, cache
 
@@ -410,14 +371,15 @@ class DBRX(nn.Module):
         super().__init__()
         self.n_layers = args.n_layers
         self.raw_weights = raw_weights
-        self.wte = nn.Embedding(args.vocab_size, args.d_model)
-        self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.resv_conn = resv_conn
         self.send_conn = send_conn
+        self.wte = nn.Embedding(args.vocab_size, args.d_model)
+        self.blocks = [DecoderLayer(args, i) for i in range(args.n_layers)]
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
+        self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
 
     def out_transform(self, x: mx.array, temp: float) -> mx.array:
-        logits = self.norm_f(x) @ self.raw_weights("lm_head").T
+        logits = self.lm_head(self.norm_f(x))
         logits = logits[:, -1, :]
         if temp == 0:
             return mx.argmax(logits, axis=-1)
@@ -425,7 +387,10 @@ class DBRX(nn.Module):
 
     def prewarm(self):
         for li in range(self.n_layers):
-            y = mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0)
+            xs = []
+            for d in self.raw_weights.experts.values():
+                xs.extend(next(d["generator"]))
+            y = mx.sum(mx.stack(xs, axis=0), axis=0)
             mx.eval(y)
             self.send_conn.send(li)  # signals that I am ready
             self.resv_conn.recv()  # confirms that everyone else is done
@@ -453,7 +418,6 @@ class DBRX(nn.Module):
             # h.shape = (sample_size, sequence_length, d_model)
             self.send_conn.send(h.shape[0] * T)
 
-        barrier = self.n_layers // 8
         for e, layer in enumerate(self.blocks):
             h, updated_cache = layer(
                 h,
@@ -466,9 +430,7 @@ class DBRX(nn.Module):
                 cache=cache[e],
             )
             if dry_run:
-                if e < barrier - 1:
-                    continue
-                break
+                continue
             cache[e] = updated_cache
 
         out = self.out_transform(h, temp)
@@ -523,11 +485,12 @@ class Generator:
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
             for e in self.model_args.ffn_config["assigned_experts"]
         }
-        mx.eval(non_experts, experts)
+        mx.eval(experts)
 
-        raw_weights = RawWeights(self.model_args.n_layers, experts, non_experts)
+        raw_weights = RawWeights(experts)
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
-        model.load_weights(list(raw_weights.lib_ptrs.items()))
+        model.load_weights(list(non_experts.items()))
+        mx.eval(model.parameters())
         model.eval()
 
         return model
@@ -556,8 +519,7 @@ class Generator:
             if n == 0:
                 if token != self.tokenizer.eos_token_id:
                     # token generation dry run
-                    for _ in range(8):
-                        self.model(y[None], temp, executor, cache=cache, dry_run=True)
+                    self.model(y[None], temp, executor, cache=cache, dry_run=True)
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
             if token == self.tokenizer.eos_token_id:
@@ -803,10 +765,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                     if ti == 0:
                         # token generation dry run
-                        for _ in range(8):
-                            for li in range(self.config["n_layers"] // 8):
-                                await self.all_dispatch_n_combine(li, 0, oth_shards)
-                                self.buffer.reset(li)
+                        for li in range(self.config["n_layers"]):
+                            await self.all_dispatch_n_combine(li, 0, oth_shards)
+                            self.buffer.reset(li)
 
                     continue_sig = self.resv_conn.recv()
                     if not continue_sig:
