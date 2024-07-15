@@ -54,10 +54,6 @@ async def make_inference_requests(
 
     output = inference_tasks[0].result()
 
-    if output.gen_t_cnt == 0:
-        print("No tokens generated for this prompt")
-        return
-
     print("RESPONSE:")
     print(output.response)
     print("PROMPT EVALUATION:")
@@ -66,22 +62,23 @@ async def make_inference_requests(
     prompt_eval_tp = output.prompt_t_cnt / output.prompt_time
     print(f"throughput: {prompt_eval_tp:.3f} t/s")
     print("TOKEN GENERATION:")
-    print(f"token count: {output.gen_t_cnt - 1}")
-    print(f"total time in sec(s): {output.gen_time:.3f}")
-    token_gen_tp = (output.gen_t_cnt - 1) / output.gen_time
-    print(f"throughput: {token_gen_tp:.3f} t/s")
+    print(f"token count: {output.gen_t_cnt}")
+    if output.gen_t_cnt > 0:
+        print(f"total time in sec(s): {output.gen_time:.3f}")
+        token_gen_tp = output.gen_t_cnt / output.gen_time
+        print(f"throughput: {token_gen_tp:.3f} t/s")
 
-    if output.gen_t_cnt >= max_tokens * 0.85:
-        avg_misc_lat = (
-            (1000 / token_gen_tp / 40) - output.avg_moe_lat - output.avg_comm_lat
-        )
-        STATS["moe_lat"].append(output.avg_moe_lat)
-        STATS["comm_lat"].append(output.avg_comm_lat)
-        STATS["misc_lat"].append(avg_misc_lat)
-        STATS["experts_act"].append(output.avg_experts_act)
-        STATS["prompt_eval_tp"].append(prompt_eval_tp)
-        STATS["token_gen_tp"].append(token_gen_tp)
-        return True
+        if (output.gen_t_cnt + 1) >= max_tokens * 0.85:
+            avg_misc_lat = (
+                (1000 / token_gen_tp / 40) - output.avg_moe_lat - output.avg_comm_lat
+            )
+            STATS["moe_lat"].append(output.avg_moe_lat)
+            STATS["comm_lat"].append(output.avg_comm_lat)
+            STATS["misc_lat"].append(avg_misc_lat)
+            STATS["experts_act"].append(output.avg_experts_act)
+            STATS["prompt_eval_tp"].append(prompt_eval_tp)
+            STATS["token_gen_tp"].append(token_gen_tp)
+            return True
 
     return False
 

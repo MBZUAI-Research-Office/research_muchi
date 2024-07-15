@@ -138,6 +138,7 @@ class RawWeights:
 
         self.raw_ptrs = raw_ptrs
         self.lib_ptrs = lib_ptrs
+        self.ne_reps = ne_reps
         self.rep_vecs = ne_reps + e_reps
         self.expert_lru = LruCache.fromkeys(experts.keys())
 
@@ -166,6 +167,7 @@ class Attention(nn.Module):
         self,
         x: mx.array,
         raw_weights: RawWeights,
+        dry_run: bool,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
@@ -198,7 +200,7 @@ class Attention(nn.Module):
             queries, keys, values, scale=self.scale, mask=mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return output @ ws["out_proj"].T, (keys, values)
+        return output @ ws["out_proj"].T, (keys, values) if not dry_run else cache
 
 
 class NormAttnNorm(nn.Module):
@@ -212,10 +214,13 @@ class NormAttnNorm(nn.Module):
         self,
         x: mx.array,
         raw_weights: RawWeights,
+        dry_run: bool,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
     ) -> mx.array:
-        h, cache = self.attn(self.norm_1(x), raw_weights, mask=mask, cache=cache)
+        h, cache = self.attn(
+            self.norm_1(x), raw_weights, dry_run, mask=mask, cache=cache
+        )
         x = h + x
         return x, self.norm_2(x), cache
 
@@ -234,7 +239,9 @@ class DistributedMoeBlock(nn.Module):
         self.dlb_groups = args.ffn_config["dlb_groups"]
         self.n_oth_shards = sum(len(d["members"]) for d in self.dlb_groups.values()) - 1
 
-    def allocate_jobs(self, inds: list[list[int]], expert_lru: LruCache) -> tuple:
+    def allocate_jobs(
+        self, inds: list[list[int]], expert_lru: LruCache, dry_run: bool
+    ) -> tuple:
         jobs = []
         job_map = []
         max_loads = []
@@ -266,20 +273,12 @@ class DistributedMoeBlock(nn.Module):
             for _ in range(n_warmups):
                 jobs[i].add(expert_lru.get_lru())
 
-            LOGS["experts_act"].append(len(jobs[i]))
+            if not dry_run:
+                LOGS["experts_act"].append(len(jobs[i]))
 
         return jobs, job_map
 
-    def moe_shard(
-        self,
-        x: mx.array,
-        job: set,
-        ws: dict,
-        dryness: int = 0,
-    ):
-        if dryness == 2:
-            return mx.ones((self.d_model, self.ne), dtype=x.dtype)
-
+    def moe_shard(self, x: mx.array, job: set, ws: dict):
         expert_outs = []
         arr_map = {}
         for e in job:
@@ -287,8 +286,6 @@ class DistributedMoeBlock(nn.Module):
             expert_outs.append(y)
             arr_map[e] = len(expert_outs) - 1
 
-        if dryness == 1:
-            return mx.stack(expert_outs, axis=-1)
         return mx.stack(expert_outs, axis=0), arr_map
 
     def call_shard_n_all_dispatch(
@@ -296,17 +293,18 @@ class DistributedMoeBlock(nn.Module):
         x: mx.array,
         jobs: list[set],
         ws: dict,
+        ne_reps: list[mx.array],
         send_conn: connection.Connection,
-        dry_runner: Callable[[int, int], None],
     ):
         tic = time.perf_counter_ns()
 
         shard_outs = {}
         for bi, xt in enumerate(x):
             expert_outs, arr_map = self.moe_shard(xt, jobs[bi], ws)
-            mx.eval(expert_outs)
-            if (bi + 1) % self.n_layers == 0:
-                dry_runner(self.layer_num - 1, 2)
+            if len(jobs) > 1:
+                mx.eval(expert_outs, mx.sum(mx.stack(ne_reps, axis=0), axis=0))
+            else:
+                mx.eval(expert_outs)
             shard_outs.setdefault(self.url, {})[bi] = (expert_outs, arr_map)
             send_conn.send_bytes(mx_to_bytes(expert_outs))
             send_conn.send_bytes(pickle.dumps((self.url, self.layer_num, bi, arr_map)))
@@ -329,11 +327,10 @@ class DistributedMoeBlock(nn.Module):
         self,
         x: mx.array,
         raw_weights: RawWeights,
-        resv_conn: Optional[connection.Connection] = None,
-        send_conn: Optional[connection.Connection] = None,
-        executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
-        dryness: Optional[int] = 0,
-        dry_runner: Optional[Callable[[int, int], None]] = None,
+        resv_conn: connection.Connection,
+        send_conn: connection.Connection,
+        executor: concurrent.futures.ThreadPoolExecutor,
+        dry_run: bool,
     ) -> mx.array:
         orig_shape = x.shape  # (sample_size, sequence_length, d_model)
         x = x.reshape(-1, x.shape[-1])  # (sample_size * sequence_length, d_model)
@@ -350,29 +347,21 @@ class DistributedMoeBlock(nn.Module):
         scores = scores.astype(x.dtype)
         mx.eval(inds, scores)
 
-        if dryness > 0:
-            # bypass cluster communication and expects batch_size = 1
-            dummy_job = {raw_weights.expert_lru.get_lru() for _ in range(self.ne)}
-            for xt, st in zip(x, scores):
-                y = self.moe_shard(xt, dummy_job, ws, dryness)
-                mx.eval(y)
-                y = (y * st).sum(axis=-1)
-                return mx.stack([y], axis=0).reshape(orig_shape)
-
         inds = inds.tolist()
-        jobs, job_map = self.allocate_jobs(inds, raw_weights.expert_lru)
+        jobs, job_map = self.allocate_jobs(inds, raw_weights.expert_lru, dry_run)
         batch_size = x.shape[0]
 
         tic = time.perf_counter_ns()
 
         comm_fut = executor.submit(self.all_combine, batch_size, resv_conn)
         shard_outs, moe_lat = self.call_shard_n_all_dispatch(
-            x, jobs, ws, send_conn, dry_runner
+            x, jobs, ws, raw_weights.ne_reps, send_conn
         )
         shard_outs.update(comm_fut.result())
 
-        LOGS["moe_lat"].append(moe_lat)
-        LOGS["comm_lat"].append(time.perf_counter_ns() - tic - moe_lat)
+        if not dry_run:
+            LOGS["moe_lat"].append(moe_lat)
+            LOGS["comm_lat"].append(time.perf_counter_ns() - tic - moe_lat)
 
         y = []
 
@@ -401,19 +390,16 @@ class DecoderLayer(nn.Module):
         self,
         x: mx.array,
         raw_weights: RawWeights,
+        resv_conn: connection.Connection,
+        send_conn: connection.Connection,
+        executor: concurrent.futures.ThreadPoolExecutor,
+        dry_run: bool,
         mask: Optional[mx.array] = None,
         cache: Optional[Tuple[mx.array, mx.array]] = None,
-        resv_conn: Optional[connection.Connection] = None,
-        send_conn: Optional[connection.Connection] = None,
-        executor: Optional[concurrent.futures.ThreadPoolExecutor] = None,
-        dryness: Optional[int] = 0,
-        dry_runner: Optional[Callable[[int, int], None]] = None,
     ):
-        r, h, cache = self.norm_attn_norm(x, raw_weights, mask, cache)
-        out = self.ffn(
-            h, raw_weights, resv_conn, send_conn, executor, dryness, dry_runner
-        )
-        return out + r, cache
+        r, h, cache = self.norm_attn_norm(x, raw_weights, dry_run, mask, cache)
+        out = self.ffn(h, raw_weights, resv_conn, send_conn, executor, dry_run) + r
+        return out, cache
 
 
 class DBRX(nn.Module):
@@ -433,10 +419,6 @@ class DBRX(nn.Module):
         self.send_conn = send_conn
         self.norm_f = nn.LayerNorm(args.d_model, bias=False)
 
-    def sync_w_oths(self, li: int):
-        self.send_conn.send(li)  # signals that I am ready
-        self.resv_conn.recv()  # confirms that everyone else is done
-
     def out_transform(self, x: mx.array, temp: float) -> mx.array:
         logits = self.norm_f(x) @ self.raw_weights("lm_head").T
         logits = logits[:, -1, :]
@@ -444,27 +426,20 @@ class DBRX(nn.Module):
             return mx.argmax(logits, axis=-1)
         return mx.random.categorical(logits * (1 / temp))
 
-    def dry_run(self, li: int, dryness: int):
-        x = self.wte(self.raw_weights.dummy_in)
-        y = self.blocks[li](x, self.raw_weights, dryness=dryness)[0]
-        mx.eval(self.out_transform(y, DEFAULT_TEMP))
-
-    def prewarm(self, dry_only: bool = False):
-        mid = self.n_layers // 2
-        for li in range(mid if dry_only else 0, self.n_layers):
-            if li < mid:
-                y = mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0)
-                mx.eval(y)
-            else:
-                self.dry_run(li, 1)
-            self.sync_w_oths(li)
+    def prewarm(self):
+        for li in range(self.n_layers):
+            y = mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0)
+            mx.eval(y)
+            self.send_conn.send(li)  # signals that I am ready
+            self.resv_conn.recv()  # confirms that everyone else is done
 
     def __call__(
         self,
         inputs: mx.array,
         temp: float,
         executor: concurrent.futures.ThreadPoolExecutor,
-        cache=None,
+        cache: Optional[list[Tuple[mx.array, mx.array]]] = None,
+        dry_run: Optional[bool] = False,
     ):
         h = self.wte(inputs)
 
@@ -481,26 +456,26 @@ class DBRX(nn.Module):
         batch_size = h.shape[0] * T
         self.send_conn.send(batch_size)
 
+        mid = self.n_layers // 2
         for e, layer in enumerate(self.blocks):
-            h, cache[e] = layer(
+            h, updated_cache = layer(
                 h,
                 self.raw_weights,
-                mask,
-                cache[e],
                 self.resv_conn,
                 self.send_conn,
                 executor,
-                0,
-                self.dry_run,
+                dry_run,
+                mask=mask,
+                cache=cache[e],
             )
+            if dry_run:
+                if e < mid - 1:
+                    continue
+                break
+            cache[e] = updated_cache
 
         out = self.out_transform(h, temp)
         mx.eval(out)
-
-        if batch_size > 1:
-            # for token generation
-            self.prewarm(dry_only=True)
-
         return out, cache
 
 
@@ -585,6 +560,10 @@ class Generator:
 
             token = y.item()  # get word ID
             if n == 0:
+                if token != self.tokenizer.eos_token_id:
+                    # token generation dry run
+                    for _ in range(2):
+                        self.model(y[None], temp, executor, cache=cache, dry_run=True)
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
             if token == self.tokenizer.eos_token_id:
@@ -600,7 +579,6 @@ class Generator:
 
             self.send_conn.send(True)
 
-        token_count = n + 1
         token_strings.append(
             self.tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, "")
         )
@@ -610,7 +588,7 @@ class Generator:
             prompt_time,
             prompt_tokens.size,
             gen_time,
-            token_count,
+            n,
             "".join(token_strings),
         ]
 
@@ -625,13 +603,14 @@ class Generator:
                 for k in ["moe_lat", "comm_lat", "experts_act"]:
                     if len(LOGS[k]) <= 40:
                         # no token generated
-                        LOGS[k] = []
                         res.append(0)
                         continue
-                    avg = statistics.mean(LOGS[k][40:])
-                    if k != "experts_act":
-                        avg /= 1000**2
-                    res.append(avg)
+                    else:
+                        avg = statistics.mean(LOGS[k][40:])
+                        if k != "experts_act":
+                            avg /= 1000**2
+                        res.append(avg)
+
                     LOGS[k] = []
 
                 self.send_conn.send(res)
@@ -722,7 +701,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         before_warming: bool = False,
     ) -> None:
 
-        async def signal(shard):
+        async def signal(shard, li):
             await shard.SignalReady(shard_envoy_pb2.Identifier(li=li))
 
         if before_warming:
@@ -735,7 +714,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
         async with asyncio.TaskGroup() as tg:
             for shard in oth_shards:
-                tg.create_task(signal(shard))
+                tg.create_task(signal(shard, li))
             tg.create_task(self.buffer.wait_til_full(li))
 
         self.buffer.reset(li)
@@ -768,12 +747,6 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         url, li, bi, arr_map = pickle.loads(request.metadata)
         self.buffer.put((request.data, request.metadata), li, bi)
         return shard_envoy_pb2.Empty()
-
-    async def prewarm(self, start: int, oth_shards: list):
-        for _ in range(start, self.config["n_layers"]):
-            await self.sync_w_oths(oth_shards)
-            # signals warmer that this layer is done
-            self.send_conn.send(True)
 
     async def Generate(self, request: shard_envoy_pb2.UsrIns, context):
         logging.info(f"received generation request")
@@ -818,11 +791,15 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 self.send_conn.send(gen["req"].max_tokens)
 
                 logging.info(f"warming...")
-                await self.prewarm(0, oth_shards)
+
+                for _ in range(self.config["n_layers"]):
+                    await self.sync_w_oths(oth_shards)
+                    # signals warmer that this layer is done
+                    self.send_conn.send(True)
 
                 logging.info(f"processing request...")
 
-                for _ in range(gen["req"].max_tokens):
+                for ti in range(gen["req"].max_tokens):
                     batch_size = self.resv_conn.recv()
                     for li in range(self.config["n_layers"]):
                         for bi in range(batch_size):
@@ -830,8 +807,11 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                         self.buffer.reset(li)
 
-                    if batch_size > 1:
-                        await self.prewarm(self.config["n_layers"] // 2, oth_shards)
+                    if ti == 0:
+                        for _ in range(2):
+                            for li in range(self.config["n_layers"] // 2):
+                                await self.all_dispatch_n_combine(li, bi, oth_shards)
+                                self.buffer.reset(li)
 
                     continue_sig = self.resv_conn.recv()
                     if not continue_sig:
