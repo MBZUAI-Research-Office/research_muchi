@@ -423,8 +423,8 @@ class DBRX(nn.Module):
             return mx.argmax(logits, axis=-1)
         return mx.random.categorical(logits * (1 / temp))
 
-    def prewarm(self, n: Optional[int] = None):
-        for li in range(n or self.n_layers):
+    def prewarm(self):
+        for li in range(self.n_layers):
             y = mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0)
             mx.eval(y)
             self.send_conn.send(li)  # signals that I am ready
@@ -556,8 +556,7 @@ class Generator:
             if n == 0:
                 if token != self.tokenizer.eos_token_id:
                     # token generation dry run
-                    self.model.prewarm(20)
-                    for _ in range(4):
+                    for _ in range(8):
                         self.model(y[None], temp, executor, cache=cache, dry_run=True)
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
@@ -804,11 +803,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                     if ti == 0:
                         # token generation dry run
-                        for _ in range(self.config["n_layers"] // 2):
-                            await self.sync_w_oths(oth_shards)
-                            # signals warmer that this layer is done
-                            self.send_conn.send(True)
-                        for _ in range(4):
+                        for _ in range(8):
                             for li in range(self.config["n_layers"] // 8):
                                 await self.all_dispatch_n_combine(li, 0, oth_shards)
                                 self.buffer.reset(li)
