@@ -452,9 +452,9 @@ class DBRX(nn.Module):
         if cache is None:
             cache = [None] * len(self.blocks)
 
-        # h.shape = (sample_size, sequence_length, d_model)
-        batch_size = h.shape[0] * T
-        self.send_conn.send(batch_size)
+        if not dry_run:
+            # h.shape = (sample_size, sequence_length, d_model)
+            self.send_conn.send(h.shape[0] * T)
 
         mid = self.n_layers // 2
         for e, layer in enumerate(self.blocks):
@@ -808,6 +808,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                         self.buffer.reset(li)
 
                     if ti == 0:
+                        # token generation dry run
                         for _ in range(2):
                             for li in range(self.config["n_layers"] // 2):
                                 await self.all_dispatch_n_combine(li, 0, oth_shards)
