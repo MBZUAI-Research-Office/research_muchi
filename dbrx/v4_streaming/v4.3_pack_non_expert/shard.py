@@ -449,7 +449,6 @@ class DBRX(nn.Module):
         if cache is None:
             cache = [None] * len(self.blocks)
 
-        batch_size = h.shape[0] * T
         if not dry_run:
             # h.shape = (sample_size, sequence_length, d_model)
             self.send_conn.send(h.shape[0] * T)
@@ -472,8 +471,6 @@ class DBRX(nn.Module):
                 break
             cache[e] = updated_cache
 
-        if batch_size > 1:
-            h += mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0) * 0
         out = self.out_transform(h, temp)
         mx.eval(out)
         return out, cache
