@@ -810,7 +810,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                     if ti == 0:
                         for _ in range(2):
                             for li in range(self.config["n_layers"] // 2):
-                                await self.all_dispatch_n_combine(li, bi, oth_shards)
+                                await self.all_dispatch_n_combine(li, 0, oth_shards)
                                 self.buffer.reset(li)
 
                     continue_sig = self.resv_conn.recv()
