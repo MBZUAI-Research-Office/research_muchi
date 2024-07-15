@@ -5,7 +5,7 @@ from collections import deque, OrderedDict
 from dataclasses import dataclass
 from multiprocessing import connection
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Optional, Tuple
 import concurrent.futures
 import argparse
 import asyncio
@@ -77,10 +77,7 @@ class LruCache(OrderedDict):
 
 class RawWeights:
 
-    def __init__(
-        self, n_layers: int, experts: dict, non_experts: dict, dummy_in: mx.array
-    ) -> None:
-        self.dummy_in = dummy_in
+    def __init__(self, n_layers: int, experts: dict, non_experts: dict) -> None:
         raw_ptrs = {i: {} for i in range(n_layers)}
         lib_ptrs = {}
         for i, mat in enumerate(non_experts["wqkv_weights"]):
@@ -426,8 +423,8 @@ class DBRX(nn.Module):
             return mx.argmax(logits, axis=-1)
         return mx.random.categorical(logits * (1 / temp))
 
-    def prewarm(self):
-        for li in range(self.n_layers):
+    def prewarm(self, n: Optional[int] = None):
+        for li in range(n or self.n_layers):
             y = mx.sum(mx.stack(self.raw_weights.rep_vecs, axis=0), axis=0)
             mx.eval(y)
             self.send_conn.send(li)  # signals that I am ready
@@ -526,12 +523,9 @@ class Generator:
             e: mx.load(str(self.model_path / f"expert{e}.safetensors"))
             for e in self.model_args.ffn_config["assigned_experts"]
         }
-        dummy_in = mx.array(self.tokenizer.encode("hello"))[None]
-        mx.eval(non_experts, experts, dummy_in)
+        mx.eval(non_experts, experts)
 
-        raw_weights = RawWeights(
-            self.model_args.n_layers, experts, non_experts, dummy_in
-        )
+        raw_weights = RawWeights(self.model_args.n_layers, experts, non_experts)
         model = DBRX(self.model_args, raw_weights, self.resv_conn, self.send_conn)
         model.load_weights(list(raw_weights.lib_ptrs.items()))
         model.eval()
@@ -562,7 +556,8 @@ class Generator:
             if n == 0:
                 if token != self.tokenizer.eos_token_id:
                     # token generation dry run
-                    for _ in range(8):
+                    self.model.prewarm(20)
+                    for _ in range(4):
                         self.model(y[None], temp, executor, cache=cache, dry_run=True)
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
@@ -809,7 +804,11 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                     if ti == 0:
                         # token generation dry run
-                        for _ in range(8):
+                        for _ in range(self.config["n_layers"] // 2):
+                            await self.sync_w_oths(oth_shards)
+                            # signals warmer that this layer is done
+                            self.send_conn.send(True)
+                        for _ in range(4):
                             for li in range(self.config["n_layers"] // 8):
                                 await self.all_dispatch_n_combine(li, 0, oth_shards)
                                 self.buffer.reset(li)
