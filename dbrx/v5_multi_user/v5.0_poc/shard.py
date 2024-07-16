@@ -576,6 +576,12 @@ class Generator:
         tic = time.perf_counter()
 
         for n in range(max_tokens):
+            if n == 1:
+                # token generation dry run
+                self.model(y, temp, executor, cache=cache, dry_run=True)
+                prompt_time = time.perf_counter() - tic
+                tic = time.perf_counter()
+
             y, cache = self.model(y, temp, executor, cache=cache)
 
             ny, nmap = [], {}
@@ -588,22 +594,15 @@ class Generator:
                 tokens[bi].append(id)
                 nmap[len(ny) - 1] = bi
 
-            y = mx.stack(ny, axis=0)
-            idx_map = nmap
-
-            if n == 0:
-                if len(ny) > 0:
-                    self.send_conn.send(True)
-                    # token generation dry run
-                    self.model(y[None], temp, executor, cache=cache, dry_run=True)
-                else:
-                    self.send_conn.send(False)  # signal no dry run
-                prompt_time = time.perf_counter() - tic
-                tic = time.perf_counter()
-            if token == self.tokenizer.eos_token_id:
+            if len(ny) == 0:
+                if n == 0:
+                    prompt_time = time.perf_counter() - tic
+                    tic = time.perf_counter()
                 self.send_conn.send(False)
                 break
-            tokens.append(token)
+
+            y = mx.stack(ny, axis=0)
+            idx_map = nmap
 
             s = self.tokenizer.decode(tokens)  # str
             # Reset token cache at line break
