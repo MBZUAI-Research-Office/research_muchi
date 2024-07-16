@@ -16,10 +16,13 @@ class Test:
         )
 
     def test(self, prompts: list[str]):
-        print(mx.array(self.tokenizer.encode(prompts))[None])
+        # print(mx.array(self.tokenizer.encode(prompts))[None])
         # print(self.tokenizer(prompts))
+        # print(self.tokenizer.decode([]).replace("\ufffd", ""))
+        print(sum(a.size for a in mx.array(self.tokenizer(prompts)["input_ids"])))
+
 
 if __name__ == "__main__":
     test = Test("/Users/xiangruike/dbrx-instruct/distributable/batch2")
-    test.test("hello")
-    # test.test(["hello there"]) 
+    # test.test("hello")
+    test.test(["hello there", "I am"])

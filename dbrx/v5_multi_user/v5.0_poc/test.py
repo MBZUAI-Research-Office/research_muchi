@@ -399,10 +399,9 @@ class DBRX(nn.Module):
             mask=mask,
             cache=cache[0],
         )
-        print(h.shape)
         h = self.out_transform(h, temp)
-        print(h.shape)
-        print(mx.stack([ht[None] for ht in h], axis=0))
+        tokens = [[ht.item()] for ht in h]
+        return tokens
         # print(h.item())
         # for id in h:
         #     print(id.item(), type(id.item()))
@@ -482,8 +481,9 @@ class Test:
         token_strings = []
         REPLACEMENT_CHAR = "\ufffd"
 
-        self.model(y, temp, cache=cache)
-
+        tokens = self.model(y, temp, cache=cache)
+        print(tokens)
+        print(self.tokenizer.batch_decode(tokens))
         # self.model.prewarm()
 
         # for n in range(max_tokens):

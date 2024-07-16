@@ -7,7 +7,7 @@ service ShardEnvoy {
 }
 
 message UsrIns {
-  string prompt = 1;
+  bytes prompts = 1;
   int32 max_tokens = 2;
 }
 
@@ -16,7 +16,7 @@ message UsrOuts {
   int32 prompt_t_cnt = 2;
   double gen_time = 3;
   int32 gen_t_cnt = 4;
-  string response = 5;
+  bytes responses = 5;
   double avg_moe_lat = 6;
   double avg_comm_lat = 7;
   double avg_experts_act = 8;

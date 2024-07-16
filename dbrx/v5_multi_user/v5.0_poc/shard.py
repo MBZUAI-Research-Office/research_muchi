@@ -495,62 +495,6 @@ class Generator:
 
         return model
 
-    # def generate(
-    #     self,
-    #     prompt: str,
-    #     max_tokens: int,
-    #     temp: float,
-    #     executor: concurrent.futures.ThreadPoolExecutor,
-    # ):
-    #     prompt_tokens = mx.array(self.tokenizer.encode(prompt))
-    #     y = prompt_tokens
-    #     cache = None
-    #     tokens = []
-    #     token_strings = []
-    #     REPLACEMENT_CHAR = "\ufffd"
-
-    #     self.model.prewarm()
-    #     tic = time.perf_counter()
-
-    #     for n in range(max_tokens):
-    #         y, cache = self.model(y[None], temp, executor, cache=cache)
-
-    #         token = y.item()  # get word ID
-    #         if n == 0:
-    #             if token != self.tokenizer.eos_token_id:
-    #                 self.send_conn.send(True)
-    #                 # token generation dry run
-    #                 self.model(y[None], temp, executor, cache=cache, dry_run=True)
-    #             else:
-    #                 self.send_conn.send(False)  # signal no dry run
-    #             prompt_time = time.perf_counter() - tic
-    #             tic = time.perf_counter()
-    #         if token == self.tokenizer.eos_token_id:
-    #             self.send_conn.send(False)
-    #             break
-    #         tokens.append(token)
-
-    #         s = self.tokenizer.decode(tokens)  # str
-    #         # Reset token cache at line break
-    #         if s[-1] == "\n":
-    #             tokens = []
-    #             token_strings.append(s)
-
-    #         self.send_conn.send(True)
-
-    #     token_strings.append(
-    #         self.tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, "")
-    #     )
-    #     gen_time = time.perf_counter() - tic
-
-    #     return [
-    #         prompt_time,
-    #         prompt_tokens.size,
-    #         gen_time,
-    #         n,
-    #         "".join(token_strings),
-    #     ]
-
     def generate(
         self,
         prompts: list[str],
@@ -558,12 +502,12 @@ class Generator:
         temp: float,
         executor: concurrent.futures.ThreadPoolExecutor,
     ):
-        batch_size = len(prompts)
+        n_prompts = len(prompts)
         idx_map = {}
         tokens = []
         token_strings = []
-        for i in range(batch_size):
-            idx_map[i] = i
+        for pi in range(n_prompts):
+            idx_map[pi] = pi
             tokens.append([])
             token_strings.append([])
 
@@ -571,6 +515,7 @@ class Generator:
         y = prompt_tokens
         cache = None
         REPLACEMENT_CHAR = "\ufffd"
+        gen_t_cnt = 0
 
         self.model.prewarm()
         tic = time.perf_counter()
@@ -579,69 +524,74 @@ class Generator:
             if n == 1:
                 # token generation dry run
                 self.model(y, temp, executor, cache=cache, dry_run=True)
-                prompt_time = time.perf_counter() - tic
+                prompt_time += time.perf_counter() - tic
                 tic = time.perf_counter()
 
             y, cache = self.model(y, temp, executor, cache=cache)
 
             ny, nmap = [], {}
             for yi, yt in enumerate(y):
-                id = yt.item()
-                if id == self.tokenizer.eos_token_id:
+                if n > 0:
+                    gen_t_cnt += 1
+                word_id = yt.item()
+                if word_id == self.tokenizer.eos_token_id:
                     continue
                 ny.append(yt[None])
-                bi = idx_map[yi]
-                tokens[bi].append(id)
-                nmap[len(ny) - 1] = bi
+                pi = idx_map[yi]
+                nmap[len(ny) - 1] = pi
+                tokens[pi].append(word_id)
+                s = self.tokenizer.decode(tokens[pi])
+                # Reset token cache at line break
+                if s[-1] == "\n":
+                    tokens[pi] = []
+                    token_strings[pi].append(s)
 
+            if n == 0:
+                prompt_time = time.perf_counter() - tic
+                tic = time.perf_counter()
             if len(ny) == 0:
-                if n == 0:
-                    prompt_time = time.perf_counter() - tic
-                    tic = time.perf_counter()
                 self.send_conn.send(False)
                 break
 
             y = mx.stack(ny, axis=0)
             idx_map = nmap
-
-            s = self.tokenizer.decode(tokens)  # str
-            # Reset token cache at line break
-            if s[-1] == "\n":
-                tokens = []
-                token_strings.append(s)
-
             self.send_conn.send(True)
 
-        token_strings.append(
-            self.tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, "")
-        )
+        responses = []
+        for pi, s in enumerate(self.tokenizer.batch_decode(tokens)):
+            responses.append(
+                "".join(token_strings[pi]) + s.replace(REPLACEMENT_CHAR, "")
+            )
         gen_time = time.perf_counter() - tic
 
         return [
             prompt_time,
-            prompt_tokens.size,
+            sum(p.size for p in prompt_tokens),
             gen_time,
-            n,
-            "".join(token_strings),
+            gen_t_cnt,
+            responses,
         ]
 
     def start(self) -> None:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             while True:
-                prompt = self.resv_conn.recv()
+                n_prompts = self.resv_conn.recv()
+                prompts = []
+                for _ in range(n_prompts):
+                    prompts.append(self.resv_conn.recv())
                 max_tokens = self.resv_conn.recv()
-                res = self.generate(prompt, max_tokens, DEFAULT_TEMP, executor)
+                res = self.generate(prompts, max_tokens, DEFAULT_TEMP, executor)
 
                 # pprint.pp(res)
                 for k in ["moe_lat", "comm_lat", "experts_act"]:
-                    if len(LOGS[k]) <= 40:
-                        # no token generated
+                    if res[3] == 0:
+                        # first token is eos
                         res.append(0)
-                        continue
                     else:
-                        avg = statistics.mean(LOGS[k][40:])
-                        if k != "experts_act":
-                            avg /= 1000**2
+                        if k == "experts_act":
+                            avg = statistics.mean(LOGS[k])
+                        else:
+                            avg = statistics.mean(LOGS[k][40:]) / 1000**2
                         res.append(avg)
 
                     LOGS[k] = []
@@ -791,7 +741,7 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             prompt_t_cnt=job["resp"][1],
             gen_time=job["resp"][2],
             gen_t_cnt=job["resp"][3],
-            response=job["resp"][4],
+            responses=pickle.dumps(job["resp"][4]),
             avg_moe_lat=job["resp"][5],
             avg_comm_lat=job["resp"][6],
             avg_experts_act=job["resp"][7],
@@ -820,7 +770,11 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 await self.sync_w_oths(oth_shards, before_warming=True)
                 gen = self.gen_queue[0]
-                self.send_conn.send(gen["req"].prompt)
+                prompts = pickle.loads(gen["req"].prompts)
+                self.send_conn.send(len(prompts))
+                # sent separately because of connection 32 MiB limit
+                for p in prompts:
+                    self.send_conn.send(p)
                 self.send_conn.send(gen["req"].max_tokens)
 
                 logging.info(f"warming...")
@@ -833,18 +787,18 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 logging.info(f"processing request...")
 
                 for ti in range(gen["req"].max_tokens):
+                    if ti == 1:
+                        # token generation dry run
+                        for li in range(self.config["n_layers"]):
+                            await self.all_dispatch_n_combine(li, 0, oth_shards)
+                            self.buffer.reset(li)
+
                     batch_size = self.resv_conn.recv()
                     for li in range(self.config["n_layers"]):
                         for bi in range(batch_size):
                             await self.all_dispatch_n_combine(li, bi, oth_shards)
 
                         self.buffer.reset(li)
-
-                    # receive dry run signal to make sure we have not hit eos token yet
-                    if ti == 0 and self.resv_conn.recv():
-                        for li in range(self.config["n_layers"]):
-                            await self.all_dispatch_n_combine(li, 0, oth_shards)
-                            self.buffer.reset(li)
 
                     continue_sig = self.resv_conn.recv()
                     if not continue_sig:
