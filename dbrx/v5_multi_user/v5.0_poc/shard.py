@@ -495,29 +495,104 @@ class Generator:
 
         return model
 
+    # def generate(
+    #     self,
+    #     prompt: str,
+    #     max_tokens: int,
+    #     temp: float,
+    #     executor: concurrent.futures.ThreadPoolExecutor,
+    # ):
+    #     prompt_tokens = mx.array(self.tokenizer.encode(prompt))
+    #     y = prompt_tokens
+    #     cache = None
+    #     tokens = []
+    #     token_strings = []
+    #     REPLACEMENT_CHAR = "\ufffd"
+
+    #     self.model.prewarm()
+    #     tic = time.perf_counter()
+
+    #     for n in range(max_tokens):
+    #         y, cache = self.model(y[None], temp, executor, cache=cache)
+
+    #         token = y.item()  # get word ID
+    #         if n == 0:
+    #             if token != self.tokenizer.eos_token_id:
+    #                 self.send_conn.send(True)
+    #                 # token generation dry run
+    #                 self.model(y[None], temp, executor, cache=cache, dry_run=True)
+    #             else:
+    #                 self.send_conn.send(False)  # signal no dry run
+    #             prompt_time = time.perf_counter() - tic
+    #             tic = time.perf_counter()
+    #         if token == self.tokenizer.eos_token_id:
+    #             self.send_conn.send(False)
+    #             break
+    #         tokens.append(token)
+
+    #         s = self.tokenizer.decode(tokens)  # str
+    #         # Reset token cache at line break
+    #         if s[-1] == "\n":
+    #             tokens = []
+    #             token_strings.append(s)
+
+    #         self.send_conn.send(True)
+
+    #     token_strings.append(
+    #         self.tokenizer.decode(tokens).replace(REPLACEMENT_CHAR, "")
+    #     )
+    #     gen_time = time.perf_counter() - tic
+
+    #     return [
+    #         prompt_time,
+    #         prompt_tokens.size,
+    #         gen_time,
+    #         n,
+    #         "".join(token_strings),
+    #     ]
+
     def generate(
         self,
-        prompt: str,
+        prompts: list[str],
         max_tokens: int,
         temp: float,
         executor: concurrent.futures.ThreadPoolExecutor,
     ):
-        prompt_tokens = mx.array(self.tokenizer.encode(prompt))
-        y = prompt_tokens
-        cache = None
+        batch_size = len(prompts)
+        idx_map = {}
         tokens = []
         token_strings = []
+        for i in range(batch_size):
+            idx_map[i] = i
+            tokens.append([])
+            token_strings.append([])
+
+        prompt_tokens = mx.array(self.tokenizer(prompts)["input_ids"])
+        y = prompt_tokens
+        cache = None
         REPLACEMENT_CHAR = "\ufffd"
 
         self.model.prewarm()
         tic = time.perf_counter()
 
         for n in range(max_tokens):
-            y, cache = self.model(y[None], temp, executor, cache=cache)
+            y, cache = self.model(y, temp, executor, cache=cache)
 
-            token = y.item()  # get word ID
+            ny, nmap = [], {}
+            for yi, yt in enumerate(y):
+                id = yt.item()
+                if id == self.tokenizer.eos_token_id:
+                    continue
+                ny.append(yt[None])
+                bi = idx_map[yi]
+                tokens[bi].append(id)
+                nmap[len(ny) - 1] = bi
+
+            y = mx.stack(ny, axis=0)
+            idx_map = nmap
+
             if n == 0:
-                if token != self.tokenizer.eos_token_id:
+                if len(ny) > 0:
                     self.send_conn.send(True)
                     # token generation dry run
                     self.model(y[None], temp, executor, cache=cache, dry_run=True)

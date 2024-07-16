@@ -22,4 +22,4 @@ class Test:
 if __name__ == "__main__":
     test = Test("/Users/xiangruike/dbrx-instruct/distributable/batch2")
     test.test("hello")
-    # test.test(["hello there", "how are you?"])
+    # test.test(["hello there"]) 
