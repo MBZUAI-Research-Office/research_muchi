@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import pickle
 import pprint
 import statistics
 import time
@@ -37,25 +38,29 @@ def get_json(file_path: Path) -> list:
 
 
 async def call(
-    shard: shard_envoy_pb2_grpc.ShardEnvoyStub, prompt: str, max_tokens: int
+    shard: shard_envoy_pb2_grpc.ShardEnvoyStub, prompts: bytes, max_tokens: int
 ) -> shard_envoy_pb2.UsrOuts:
     return await shard.Generate(
-        shard_envoy_pb2.UsrIns(prompt=prompt, max_tokens=max_tokens)
+        shard_envoy_pb2.UsrIns(prompts=prompts, max_tokens=max_tokens)
     )
 
 
 async def make_inference_requests(
-    shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub], prompt: str, max_tokens: int
+    shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub],
+    prompts: bytes,
+    max_tokens: int,
+    batch_size: int,
 ):
     async with asyncio.TaskGroup() as tg:
         inference_tasks = []
         for shard in shards:
-            inference_tasks.append(tg.create_task(call(shard, prompt, max_tokens)))
+            inference_tasks.append(tg.create_task(call(shard, prompts, max_tokens)))
 
     output = inference_tasks[0].result()
 
+    print(f"BATCH SIZE: {batch_size}")
     print("RESPONSE:")
-    print(output.response)
+    print(output.responses)
     print("PROMPT EVALUATION:")
     print(f"token count: {output.prompt_t_cnt}")
     print(f"total time in sec(s): {output.prompt_time:.3f}")
@@ -68,7 +73,7 @@ async def make_inference_requests(
         token_gen_tp = output.gen_t_cnt / output.gen_time
         print(f"throughput: {token_gen_tp:.3f} t/s")
 
-        if (output.gen_t_cnt + 1) >= max_tokens * 0.85:
+        if (output.gen_t_cnt + batch_size) >= max_tokens * batch_size * 0.85:
             avg_misc_lat = (
                 (1000 / token_gen_tp / 40) - output.avg_moe_lat - output.avg_comm_lat
             )
@@ -84,7 +89,12 @@ async def make_inference_requests(
 
 
 async def start(
-    config_path: str, prompt: str, prompt_path: str, n_samples: int, max_tokens: int
+    config_path: str,
+    prompt: str,
+    prompt_path: str,
+    batch: bool,
+    n_samples: int,
+    max_tokens: int,
 ) -> None:
     assert max_tokens > 0
 
@@ -92,6 +102,12 @@ async def start(
 
     shard_urls = get_json(Path(config_path))["shard_urls"]
     prompts = get_json(Path(prompt_path))["prompts"] if not prompt else [prompt]
+    p_args = []
+    if batch:
+        p_args.append({"prompts": pickle.dumps(prompts), "batch_size": len(prompts)})
+    else:
+        for p in prompts:
+            p_args.append({"prompts": pickle.dumps([p]), "batch_size": 1})
     n_satisfying_resp = 0
 
     async with AsyncExitStack() as es:
@@ -109,11 +125,14 @@ async def start(
             shard = shard_envoy_pb2_grpc.ShardEnvoyStub(channel)
             shards.append(shard)
 
-        for _ in range(n_samples):
-            for p in prompts:
-                satisfied = await make_inference_requests(shards, p, max_tokens)
+        for i in range(n_samples):
+            print(f"\n{'=' * 10} starting sample {i} {'=' * 10}\n")
+            for ps, batch_size in p_args:
+                satisfied = await make_inference_requests(
+                    shards, ps, max_tokens, batch_size
+                )
                 n_satisfying_resp += int(satisfied)
-                time.sleep(1)
+                time.sleep(5)
 
     print(f"\nnumber of responses reaching max-tokens: {n_satisfying_resp}")
     print(f"AVG MoE latency: {statistics.mean(STATS['moe_lat'])} ms")
@@ -137,6 +156,7 @@ if __name__ == "__main__":
         help="Message to be processed by the model",
     )
     parser.add_argument("--prompt-path", type=str)
+    parser.add_argument("--batch", action="store_true")
     parser.add_argument("--n-samples", type=int)
     parser.add_argument(
         "--max-tokens",
@@ -152,6 +172,7 @@ if __name__ == "__main__":
             args.config_path,
             args.prompt,
             args.prompt_path,
+            args.batch,
             args.n_samples,
             args.max_tokens,
         )
