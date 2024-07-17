@@ -104,10 +104,10 @@ async def start(
     prompts = get_json(Path(prompt_path))["prompts"] if not prompt else [prompt]
     p_args = []
     if batch:
-        p_args.append({"prompts": pickle.dumps(prompts), "batch_size": len(prompts)})
+        p_args.append((pickle.dumps(prompts), len(prompts)))
     else:
         for p in prompts:
-            p_args.append({"prompts": pickle.dumps([p]), "batch_size": 1})
+            p_args.append((pickle.dumps([p]), 1))
     n_satisfying_resp = 0
 
     async with AsyncExitStack() as es:
