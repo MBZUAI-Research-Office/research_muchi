@@ -796,9 +796,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 for ti in range(gen["req"].max_tokens):
                     if ti == 1:
                         # token generation dry run
-                        self.gen_token(oth_shards)
+                        await self.gen_token(oth_shards)
 
-                    self.gen_token(oth_shards)
+                    await self.gen_token(oth_shards)
                     continue_sig = self.resv_conn.recv()
                     if not continue_sig:
                         break
