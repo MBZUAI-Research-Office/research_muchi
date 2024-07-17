@@ -414,9 +414,8 @@ class DBRX(nn.Module):
         if cache is None:
             cache = [None] * len(self.blocks)
 
-        if not dry_run:
-            # h.shape = (sample_size, sequence_length, d_model)
-            self.send_conn.send(h.shape[0] * T)
+        # h.shape = (sample_size, sequence_length, d_model)
+        self.send_conn.send(h.shape[0] * T)
 
         for e, layer in enumerate(self.blocks):
             h, updated_cache = layer(
@@ -747,6 +746,14 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             avg_experts_act=job["resp"][7],
         )
 
+    async def gen_token(self, oth_shards: list) -> None:
+        batch_size = self.resv_conn.recv()
+        for li in range(self.config["n_layers"]):
+            for bi in range(batch_size):
+                await self.all_dispatch_n_combine(li, bi, oth_shards)
+
+            self.buffer.reset(li)
+
     async def start(self) -> None:
         async with AsyncExitStack() as es:
             oth_shards = []
@@ -789,17 +796,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
                 for ti in range(gen["req"].max_tokens):
                     if ti == 1:
                         # token generation dry run
-                        for li in range(self.config["n_layers"]):
-                            await self.all_dispatch_n_combine(li, 0, oth_shards)
-                            self.buffer.reset(li)
+                        self.gen_token(oth_shards)
 
-                    batch_size = self.resv_conn.recv()
-                    for li in range(self.config["n_layers"]):
-                        for bi in range(batch_size):
-                            await self.all_dispatch_n_combine(li, bi, oth_shards)
-
-                        self.buffer.reset(li)
-
+                    self.gen_token(oth_shards)
                     continue_sig = self.resv_conn.recv()
                     if not continue_sig:
                         break
