@@ -60,7 +60,7 @@ async def make_inference_requests(
 
     print(f"BATCH SIZE: {batch_size}")
     print("RESPONSE:")
-    print(output.responses)
+    pprint.pp(json.loads(output.responses))
     print("PROMPT EVALUATION:")
     print(f"token count: {output.prompt_t_cnt}")
     print(f"total time in sec(s): {output.prompt_time:.3f}")

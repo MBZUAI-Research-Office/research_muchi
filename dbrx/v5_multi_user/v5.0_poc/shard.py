@@ -528,7 +528,7 @@ class Generator:
 
             y, cache = self.model(y, temp, executor, cache=cache)
 
-            ny, nmap = [], {}
+            ny, nmap, cis = [], {}, []
             for yi, yt in enumerate(y):
                 if n > 0:
                     gen_t_cnt += 1
@@ -538,12 +538,19 @@ class Generator:
                 ny.append(yt[None])
                 pi = idx_map[yi]
                 nmap[len(ny) - 1] = pi
+                cis.append(yi)
                 tokens[pi].append(word_id)
                 s = self.tokenizer.decode(tokens[pi])
                 # Reset token cache at line break
                 if s[-1] == "\n":
                     tokens[pi] = []
                     token_strings[pi].append(s)
+
+            # adjust kv cache if any sequence ends early
+            if len(cis) < y.shape[0]:
+                cis = mx.array(cis)
+                key_cache, value_cache = cache
+                cache = (mx.take(key_cache, cis, axis=0), mx.take(value_cache, cis, axis=0))
 
             if n == 0:
                 prompt_time = time.perf_counter() - tic
