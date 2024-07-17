@@ -1,6 +1,7 @@
 #!/Users/xiangruike/miniconda3/envs/dbrx_poc/bin/python
 
 from pathlib import Path
+import json
 
 import mlx.core as mx
 
@@ -21,8 +22,15 @@ class Test:
         # print(self.tokenizer.decode([]).replace("\ufffd", ""))
         print(sum(a.size for a in mx.array(self.tokenizer(prompts)["input_ids"])))
 
+    def test1(self):
+        with open("/Users/xiangruike/research_muchi/dbrx/prompts/short.json", "r") as f:
+            prompts = json.load(f)["prompts"]
+        print([len(p) for p in self.tokenizer(prompts)["input_ids"]])
+        print([len(self.tokenizer.encode(p)) for p in prompts])
+
 
 if __name__ == "__main__":
     test = Test("/Users/xiangruike/dbrx-instruct/distributable/batch2")
     # test.test("hello")
-    test.test(["hello there", "I am"])
+    # test.test(["hello there", "I am"])
+    test.test1()

@@ -511,7 +511,7 @@ class Generator:
             tokens.append([])
             token_strings.append([])
 
-        prompt_tokens = mx.array(self.tokenizer(prompts, truncation=True)["input_ids"])
+        prompt_tokens = mx.array(self.tokenizer(prompts)["input_ids"])
         y = prompt_tokens
         cache = None
         REPLACEMENT_CHAR = "\ufffd"
