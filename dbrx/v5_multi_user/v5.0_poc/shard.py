@@ -40,6 +40,7 @@ import statistics
 LOGS = {
     "moe_lat": [],
     "comm_lat": [],
+    "misc_lat": [],  # unused
     "experts_act": [],
 }
 
@@ -519,8 +520,8 @@ class Generator:
         self.model.prewarm()
         tic = time.perf_counter()
 
-        for n in range(max_tokens):
-            if n == 1:
+        for ti in range(max_tokens):
+            if ti == 1:
                 # token generation dry run
                 self.model(y, temp, executor, cache=cache, dry_run=True)
                 prompt_time += time.perf_counter() - tic
@@ -530,7 +531,7 @@ class Generator:
 
             ny, nmap, cis = [], {}, []
             for yi, yt in enumerate(y):
-                if n > 0:
+                if ti > 0:
                     gen_t_cnt += 1
                 word_id = yt.item()
                 if word_id == self.tokenizer.eos_token_id:
@@ -556,7 +557,7 @@ class Generator:
                         mx.take(value_cache, cis, axis=0),
                     )
 
-            if n == 0:
+            if ti == 0:
                 prompt_time = time.perf_counter() - tic
                 tic = time.perf_counter()
             if len(ny) == 0:
@@ -580,6 +581,7 @@ class Generator:
             gen_time,
             gen_t_cnt,
             responses,
+            ti,
         ]
 
     def start(self) -> None:
@@ -592,17 +594,18 @@ class Generator:
                 max_tokens = self.resv_conn.recv()
                 res = self.generate(prompts, max_tokens, DEFAULT_TEMP, executor)
 
-                for k in ["moe_lat", "comm_lat", "experts_act"]:
-                    if res[3] == 0:
-                        # first token is eos
-                        res.append(0)
-                    else:
-                        if k == "experts_act":
-                            avg = statistics.mean(LOGS[k])
-                        else:
-                            avg = statistics.mean(LOGS[k][40:]) / 1000**2
-                        res.append(avg)
-
+                n_tkn_passes = res.pop()
+                n_layers = self.model_args.n_layers
+                if res[3] == 0:
+                    res.extend([0] * len(LOGS))
+                else:
+                    res.append(statistics.mean(LOGS["moe_lat"][n_layers:]) / 1000**2)
+                    res.append(statistics.mean(LOGS["comm_lat"][n_layers:]) / 1000**2)
+                    res.append(
+                        (res[2] * 1000 / n_tkn_passes / n_layers) - res[-2] - res[-1]
+                    )
+                    res.append(statistics.mean(LOGS["experts_act"]))
+                for k in LOGS:
                     LOGS[k] = []
 
                 self.send_conn.send(res)
@@ -752,7 +755,8 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
             gen_t_cnt=job["resp"][3],
             avg_moe_lat=job["resp"][5],
             avg_comm_lat=job["resp"][6],
-            avg_experts_act=job["resp"][7],
+            avg_misc_lat=job["resp"][7],
+            avg_experts_act=job["resp"][8],
         )
         outs.responses[:] = job["resp"][4]
         return outs

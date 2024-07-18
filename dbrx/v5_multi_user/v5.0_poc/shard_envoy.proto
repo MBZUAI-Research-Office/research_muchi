@@ -19,7 +19,8 @@ message UsrOuts {
   repeated string responses = 5;
   double avg_moe_lat = 6;
   double avg_comm_lat = 7;
-  double avg_experts_act = 8;
+  double avg_misc_lat = 8;
+  double avg_experts_act = 9;
 }
 
 message ShardOuts {

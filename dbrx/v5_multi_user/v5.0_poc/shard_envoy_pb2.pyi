@@ -14,7 +14,7 @@ class UsrIns(_message.Message):
     def __init__(self, prompts: _Optional[_Iterable[str]] = ..., max_tokens: _Optional[int] = ...) -> None: ...
 
 class UsrOuts(_message.Message):
-    __slots__ = ("prompt_time", "prompt_t_cnt", "gen_time", "gen_t_cnt", "responses", "avg_moe_lat", "avg_comm_lat", "avg_experts_act")
+    __slots__ = ("prompt_time", "prompt_t_cnt", "gen_time", "gen_t_cnt", "responses", "avg_moe_lat", "avg_comm_lat", "avg_misc_lat", "avg_experts_act")
     PROMPT_TIME_FIELD_NUMBER: _ClassVar[int]
     PROMPT_T_CNT_FIELD_NUMBER: _ClassVar[int]
     GEN_TIME_FIELD_NUMBER: _ClassVar[int]
@@ -22,6 +22,7 @@ class UsrOuts(_message.Message):
     RESPONSES_FIELD_NUMBER: _ClassVar[int]
     AVG_MOE_LAT_FIELD_NUMBER: _ClassVar[int]
     AVG_COMM_LAT_FIELD_NUMBER: _ClassVar[int]
+    AVG_MISC_LAT_FIELD_NUMBER: _ClassVar[int]
     AVG_EXPERTS_ACT_FIELD_NUMBER: _ClassVar[int]
     prompt_time: float
     prompt_t_cnt: int
@@ -30,8 +31,9 @@ class UsrOuts(_message.Message):
     responses: _containers.RepeatedScalarFieldContainer[str]
     avg_moe_lat: float
     avg_comm_lat: float
+    avg_misc_lat: float
     avg_experts_act: float
-    def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., responses: _Optional[_Iterable[str]] = ..., avg_moe_lat: _Optional[float] = ..., avg_comm_lat: _Optional[float] = ..., avg_experts_act: _Optional[float] = ...) -> None: ...
+    def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., responses: _Optional[_Iterable[str]] = ..., avg_moe_lat: _Optional[float] = ..., avg_comm_lat: _Optional[float] = ..., avg_misc_lat: _Optional[float] = ..., avg_experts_act: _Optional[float] = ...) -> None: ...
 
 class ShardOuts(_message.Message):
     __slots__ = ("data", "metadata")

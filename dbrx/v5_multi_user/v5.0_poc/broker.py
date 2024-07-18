@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import json
 import logging
-import pickle
 import pprint
 import statistics
 import time
@@ -75,12 +74,9 @@ async def make_inference_requests(
         print(f"throughput: {token_gen_tp:.3f} t/s")
 
         if (output.gen_t_cnt + batch_size) >= max_tokens * batch_size * 0.85:
-            avg_misc_lat = (
-                (1000 / token_gen_tp / 40) - output.avg_moe_lat - output.avg_comm_lat
-            )
             STATS["moe_lat"].append(output.avg_moe_lat)
             STATS["comm_lat"].append(output.avg_comm_lat)
-            STATS["misc_lat"].append(avg_misc_lat)
+            STATS["misc_lat"].append(output.avg_misc_lat)
             STATS["experts_act"].append(output.avg_experts_act)
             STATS["prompt_eval_tp"].append(prompt_eval_tp)
             STATS["token_gen_tp"].append(token_gen_tp)
