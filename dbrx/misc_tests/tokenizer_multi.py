@@ -26,7 +26,6 @@ class Test:
         with open("/Users/xiangruike/research_muchi/dbrx/prompts/short.json", "r") as f:
             prompts = json.load(f)["prompts"]
         print([len(p) for p in self.tokenizer(prompts)["input_ids"]])
-        print([len(self.tokenizer.encode(p)) for p in prompts])
 
 
 if __name__ == "__main__":
