@@ -549,11 +549,12 @@ class Generator:
             # adjust kv cache if any sequence ends early
             if len(cis) < y.shape[0]:
                 cis = mx.array(cis)
-                key_cache, value_cache = cache
-                cache = (
-                    mx.take(key_cache, cis, axis=0),
-                    mx.take(value_cache, cis, axis=0),
-                )
+                for e in range(len(cache)):
+                    key_cache, value_cache = cache[e]
+                    cache[e] = (
+                        mx.take(key_cache, cis, axis=0),
+                        mx.take(value_cache, cis, axis=0),
+                    )
 
             if n == 0:
                 prompt_time = time.perf_counter() - tic
