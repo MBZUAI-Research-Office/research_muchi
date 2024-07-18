@@ -550,7 +550,10 @@ class Generator:
             if len(cis) < y.shape[0]:
                 cis = mx.array(cis)
                 key_cache, value_cache = cache
-                cache = (mx.take(key_cache, cis, axis=0), mx.take(value_cache, cis, axis=0))
+                cache = (
+                    mx.take(key_cache, cis, axis=0),
+                    mx.take(value_cache, cis, axis=0),
+                )
 
             if n == 0:
                 prompt_time = time.perf_counter() - tic
@@ -588,7 +591,6 @@ class Generator:
                 max_tokens = self.resv_conn.recv()
                 res = self.generate(prompts, max_tokens, DEFAULT_TEMP, executor)
 
-                # pprint.pp(res)
                 for k in ["moe_lat", "comm_lat", "experts_act"]:
                     if res[3] == 0:
                         # first token is eos
@@ -742,16 +744,17 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
         job = {"req": request, "completed": asyncio.Event()}
         self.gen_queue.append(job)
         await job["completed"].wait()
-        return shard_envoy_pb2.UsrOuts(
+        outs = shard_envoy_pb2.UsrOuts(
             prompt_time=job["resp"][0],
             prompt_t_cnt=job["resp"][1],
             gen_time=job["resp"][2],
             gen_t_cnt=job["resp"][3],
-            responses=pickle.dumps(job["resp"][4]),
             avg_moe_lat=job["resp"][5],
             avg_comm_lat=job["resp"][6],
             avg_experts_act=job["resp"][7],
         )
+        outs.responses[:] = job["resp"][4]
+        return outs
 
     async def gen_token(self, oth_shards: list) -> None:
         batch_size = self.resv_conn.recv()
@@ -784,10 +787,9 @@ class ShardEnvoyServicer(shard_envoy_pb2_grpc.ShardEnvoyServicer):
 
                 await self.sync_w_oths(oth_shards, before_warming=True)
                 gen = self.gen_queue[0]
-                prompts = pickle.loads(gen["req"].prompts)
-                self.send_conn.send(len(prompts))
+                self.send_conn.send(len(gen["req"].prompts))
                 # sent separately because of connection 32 MiB limit
-                for p in prompts:
+                for p in gen["req"].prompts:
                     self.send_conn.send(p)
                 self.send_conn.send(gen["req"].max_tokens)
 

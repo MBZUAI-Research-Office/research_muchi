@@ -1,6 +1,7 @@
+from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Optional as _Optional
+from typing import ClassVar as _ClassVar, Iterable as _Iterable, Optional as _Optional
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -8,9 +9,9 @@ class UsrIns(_message.Message):
     __slots__ = ("prompts", "max_tokens")
     PROMPTS_FIELD_NUMBER: _ClassVar[int]
     MAX_TOKENS_FIELD_NUMBER: _ClassVar[int]
-    prompts: bytes
+    prompts: _containers.RepeatedScalarFieldContainer[str]
     max_tokens: int
-    def __init__(self, prompts: _Optional[bytes] = ..., max_tokens: _Optional[int] = ...) -> None: ...
+    def __init__(self, prompts: _Optional[_Iterable[str]] = ..., max_tokens: _Optional[int] = ...) -> None: ...
 
 class UsrOuts(_message.Message):
     __slots__ = ("prompt_time", "prompt_t_cnt", "gen_time", "gen_t_cnt", "responses", "avg_moe_lat", "avg_comm_lat", "avg_experts_act")
@@ -26,11 +27,11 @@ class UsrOuts(_message.Message):
     prompt_t_cnt: int
     gen_time: float
     gen_t_cnt: int
-    responses: bytes
+    responses: _containers.RepeatedScalarFieldContainer[str]
     avg_moe_lat: float
     avg_comm_lat: float
     avg_experts_act: float
-    def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., responses: _Optional[bytes] = ..., avg_moe_lat: _Optional[float] = ..., avg_comm_lat: _Optional[float] = ..., avg_experts_act: _Optional[float] = ...) -> None: ...
+    def __init__(self, prompt_time: _Optional[float] = ..., prompt_t_cnt: _Optional[int] = ..., gen_time: _Optional[float] = ..., gen_t_cnt: _Optional[int] = ..., responses: _Optional[_Iterable[str]] = ..., avg_moe_lat: _Optional[float] = ..., avg_comm_lat: _Optional[float] = ..., avg_experts_act: _Optional[float] = ...) -> None: ...
 
 class ShardOuts(_message.Message):
     __slots__ = ("data", "metadata")

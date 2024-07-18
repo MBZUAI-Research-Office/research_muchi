@@ -38,29 +38,30 @@ def get_json(file_path: Path) -> list:
 
 
 async def call(
-    shard: shard_envoy_pb2_grpc.ShardEnvoyStub, prompts: bytes, max_tokens: int
+    shard: shard_envoy_pb2_grpc.ShardEnvoyStub, req_body: shard_envoy_pb2.UsrIns
 ) -> shard_envoy_pb2.UsrOuts:
-    return await shard.Generate(
-        shard_envoy_pb2.UsrIns(prompts=prompts, max_tokens=max_tokens)
-    )
+    return await shard.Generate(req_body)
 
 
 async def make_inference_requests(
     shards: list[shard_envoy_pb2_grpc.ShardEnvoyStub],
-    prompts: bytes,
+    prompts: list[str],
     max_tokens: int,
-    batch_size: int,
 ):
+    req_body = shard_envoy_pb2.UsrIns(max_tokens=max_tokens)
+    req_body.prompts[:] = prompts
+
     async with asyncio.TaskGroup() as tg:
         inference_tasks = []
         for shard in shards:
-            inference_tasks.append(tg.create_task(call(shard, prompts, max_tokens)))
+            inference_tasks.append(tg.create_task(call(shard, req_body)))
 
     output = inference_tasks[0].result()
+    batch_size = len(prompts)
 
     print(f"BATCH SIZE: {batch_size}")
     print("RESPONSE:")
-    pprint.pp(json.loads(output.responses))
+    pprint.pp(output.responses)
     print("PROMPT EVALUATION:")
     print(f"token count: {output.prompt_t_cnt}")
     print(f"total time in sec(s): {output.prompt_time:.3f}")
@@ -102,13 +103,7 @@ async def start(
 
     shard_urls = get_json(Path(config_path))["shard_urls"]
     prompts = get_json(Path(prompt_path))["prompts"] if not prompt else [prompt]
-    p_args = []
-    if batch:
-        p_args.append((pickle.dumps(prompts), len(prompts)))
-    else:
-        for p in prompts:
-            p_args.append((pickle.dumps([p]), 1))
-    n_satisfying_resp = 0
+    n_satisfied = 0
 
     async with AsyncExitStack() as es:
         shards = []
@@ -127,14 +122,20 @@ async def start(
 
         for i in range(n_samples):
             print(f"\n{'=' * 10} starting sample {i} {'=' * 10}\n")
-            for ps, batch_size in p_args:
-                satisfied = await make_inference_requests(
-                    shards, ps, max_tokens, batch_size
-                )
-                n_satisfying_resp += int(satisfied)
-                time.sleep(5)
 
-    print(f"\nnumber of responses reaching max-tokens: {n_satisfying_resp}")
+            if batch:
+                n_satisfied += int(
+                    await make_inference_requests(shards, prompts, max_tokens)
+                )
+            else:
+                for p in prompts:
+                    n_satisfied += int(
+                        await make_inference_requests(shards, [p], max_tokens)
+                    )
+
+            time.sleep(5)
+
+    print(f"\nnumber of responses reaching max-tokens: {n_satisfied}")
     print(f"AVG MoE latency: {statistics.mean(STATS['moe_lat'])} ms")
     print(f"AVG Comm latency: {statistics.mean(STATS['comm_lat'])} ms")
     print(f"AVG Misc latency: {statistics.mean(STATS['misc_lat'])} ms")
