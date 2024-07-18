@@ -89,6 +89,7 @@ async def start(
     config_path: str,
     prompt: str,
     prompt_path: str,
+    n_prompts: int,
     batch: bool,
     n_samples: int,
     max_tokens: int,
@@ -98,7 +99,9 @@ async def start(
     print("INFERENCE STARTED:")
 
     shard_urls = get_json(Path(config_path))["shard_urls"]
-    prompts = get_json(Path(prompt_path))["prompts"] if not prompt else [prompt]
+    prompts = (
+        get_json(Path(prompt_path))["prompts"][:n_prompts] if not prompt else [prompt]
+    )
     n_satisfied = 0
 
     async with AsyncExitStack() as es:
@@ -153,6 +156,7 @@ if __name__ == "__main__":
         help="Message to be processed by the model",
     )
     parser.add_argument("--prompt-path", type=str)
+    parser.add_argument("--n-prompts", type=int)
     parser.add_argument("--batch", action="store_true")
     parser.add_argument("--n-samples", type=int)
     parser.add_argument(
@@ -169,6 +173,7 @@ if __name__ == "__main__":
             args.config_path,
             args.prompt,
             args.prompt_path,
+            args.n_prompts,
             args.batch,
             args.n_samples,
             args.max_tokens,
