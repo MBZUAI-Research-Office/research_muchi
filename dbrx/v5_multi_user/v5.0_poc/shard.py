@@ -547,6 +547,13 @@ class Generator:
                     tokens[pi] = []
                     token_strings[pi].append(s)
 
+            if ti == 0:
+                prompt_time = time.perf_counter() - tic
+                tic = time.perf_counter()
+            if len(ny) == 0:
+                self.send_conn.send(False)
+                break
+
             # adjust kv cache if any sequence ends early
             if len(cis) < y.shape[0]:
                 cis = mx.array(cis)
@@ -556,13 +563,6 @@ class Generator:
                         mx.take(key_cache, cis, axis=0),
                         mx.take(value_cache, cis, axis=0),
                     )
-
-            if ti == 0:
-                prompt_time = time.perf_counter() - tic
-                tic = time.perf_counter()
-            if len(ny) == 0:
-                self.send_conn.send(False)
-                break
 
             y = mx.stack(ny, axis=0)
             idx_map = nmap

@@ -131,6 +131,7 @@ async def start(
                     n_satisfied += int(
                         await make_inference_requests(shards, [p], max_tokens)
                     )
+                    time.sleep(1)
 
             time.sleep(5)
 
